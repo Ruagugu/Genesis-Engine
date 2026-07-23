@@ -7,6 +7,7 @@ node_modules/
 # Local test artifacts
 playwright-report/
 test-results/
+qa/shots/
 
 # Local conversation exports
 对话记录*.md
