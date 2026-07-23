@@ -139,7 +139,11 @@ GE.llmConfig = (function () {
       persist();
       return { ok: true, models, raw: data };
     } catch (err) {
-      const msg = err && err.name === 'AbortError' ? '请求超时' : String(err && err.message || err);
+      const msg = err && err.name === 'AbortError'
+        ? '请求超时'
+        : /Failed to fetch|NetworkError|ERR_/i.test(String(err && err.message || err))
+          ? '网络失败：无法连接 API（检查 Base URL / 代理 / CORS / 密钥）'
+          : String(err && err.message || err);
       return { ok: false, models: [], error: msg };
     } finally {
       if (timer) clearTimeout(timer);
@@ -192,7 +196,11 @@ GE.llmConfig = (function () {
         && data.choices[0].message.content;
       return { ok: true, content: content || '', raw: data };
     } catch (err) {
-      const msg = err && err.name === 'AbortError' ? '请求超时' : String(err && err.message || err);
+      const msg = err && err.name === 'AbortError'
+        ? '请求超时'
+        : /Failed to fetch|NetworkError|ERR_/i.test(String(err && err.message || err))
+          ? '网络失败：无法连接 API（检查 Base URL / 代理 / CORS / 密钥）'
+          : String(err && err.message || err);
       return { ok: false, error: msg };
     } finally {
       if (timer) clearTimeout(timer);

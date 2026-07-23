@@ -647,7 +647,18 @@ GE.app = (function () {
 
   function applyDeduceResult(result, opts) {
     opts = opts || {};
-    state.deductionRound = (result.round && result.round.n) || (state.deductionRound + 1);
+    // 服务端 round.n 是当前 Run 内序号（reset 后从 1 计）。
+    // 本地种子 log 可能已有演示轮次，UI 轮次不得回退。
+    const serverRound = result.round && result.round.n;
+    if (serverRound != null) {
+      if (state.deductionRound > 0 && serverRound < state.deductionRound) {
+        state.deductionRound = state.deductionRound + 1;
+      } else {
+        state.deductionRound = serverRound;
+      }
+    } else {
+      state.deductionRound = state.deductionRound + 1;
+    }
     state.simulatedYear = result.year != null ? result.year : state.simulatedYear;
     GE.data.world.年数 = state.simulatedYear;
     if (result.revision != null) {
@@ -659,13 +670,16 @@ GE.app = (function () {
 
     const log = {
       round: state.deductionRound,
+      serverRound: serverRound != null ? serverRound : null,
+      revision: result.revision != null ? result.revision : null,
       year: `${(GE.data.world.纪元 && GE.data.world.纪元.纪年) || '第4纪元'} · ${state.simulatedYear}年`,
       summary: (result.chronicle && result.chronicle[0] && result.chronicle[0].事件)
         || (result.decisions && result.decisions[0] && result.decisions[0].decision)
         || '推演已收敛',
       lenses: result.lenses || {},
       decisions: result.decisions || [],
-      worldDelta: result.worldDelta || null
+      worldDelta: result.worldDelta || null,
+      agentMode: (result.round && result.round.agentMode) || 'rules_only'
     };
     GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
     GE.data.deduction.log.unshift(log);

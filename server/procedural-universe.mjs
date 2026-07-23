@@ -36,12 +36,31 @@ const PLANET_SLOTS = [
 ];
 
 const NAME_A = ['玄', '苍', '白', '赤', '金', '青', '银', '暗', '耀', '寂', '晨', '暮', '潮', '霜', '焰', '渊'];
-const NAME_B = ['枢', '阙', '庭', '渊', '海', '原', '脊', '环', '灯', '门', '角', '湾', '礁', '庭', '垒', '台'];
+// 注意：字表内勿重复，否则两字名碰撞率偏高（曾出现「寂庭」×2）
+const NAME_B = ['枢', '阙', '庭', '渊', '海', '原', '脊', '环', '灯', '门', '角', '湾', '礁', '垒', '台', '墟'];
 const NAME_SYS = ['织女', '牵牛', '北落', '天市', '太微', '紫微', '角宿', '心宿', '参宿', '井宿', '翼宿', '轸宿', '奎宿', '娄宿', '胃宿', '昴宿'];
 
 function pickName(rnd, pool, n) {
   let s = '';
   for (let i = 0; i < n; i++) s += pool[Math.floor(rnd() * pool.length)];
+  return s;
+}
+
+/** 在已占用集合内生成不重复两字名；池耗尽时加数字后缀 */
+function uniquePairName(rnd, used) {
+  used = used || new Set();
+  for (let attempt = 0; attempt < 48; attempt++) {
+    const s = pickName(rnd, NAME_A, 1) + pickName(rnd, NAME_B, 1);
+    if (!used.has(s)) {
+      used.add(s);
+      return s;
+    }
+  }
+  let n = 2;
+  while (used.has(pickName(rnd, NAME_A, 1) + pickName(rnd, NAME_B, 1) + n)) n++;
+  const base = pickName(rnd, NAME_A, 1) + pickName(rnd, NAME_B, 1);
+  const s = base + n;
+  used.add(s);
   return s;
 }
 
@@ -111,10 +130,14 @@ function expandSystemToDetailed(system, galaxy, runSeed) {
   const rnd = mulberry32((system.seedHandle ^ runSeed ^ 0xabcd) >>> 0);
   const starT = system.starType || STAR_TYPES[1];
   const bodies = [];
+  const usedNames = new Set();
+  if (system.name) usedNames.add(String(system.name).replace(/系$/, ''));
   const r0 = starT.radius[0] + rnd() * (starT.radius[1] - starT.radius[0]);
+  const starName = system.name.replace(/系$/, '') || uniquePairName(rnd, usedNames);
+  usedNames.add(starName);
   const star = {
     id: system.starId,
-    name: system.name.replace(/系$/, '') || '无名恒星',
+    name: starName,
     type: starT.type,
     subtype: starT.subtype,
     color: starT.color,
@@ -137,7 +160,7 @@ function expandSystemToDetailed(system, galaxy, runSeed) {
     const a = Math.round(baseA * aMul * (1 + i * 0.15));
     const landable = !!slot.landable && rnd() > 0.25;
     const id = bodyId(system.id, 'p', i + 1);
-    const pname = pickName(rnd, NAME_A, 1) + pickName(rnd, NAME_B, 1);
+    const pname = uniquePairName(rnd, usedNames);
     const body = {
       id,
       name: pname,

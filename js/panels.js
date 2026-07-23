@@ -811,7 +811,7 @@ GE.panels = (function () {
           </div>
           <div id="llm-status" class="mono" style="font-size:11.5px;color:var(--tx-2);min-height:1.4em;margin-top:4px"></div>
         </div>
-        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 密钥仅存本机 localStorage（ge-llm-config-v1），不会上传到创世引擎服务器。hybrid 推演插口见阶段 C6。</div>`,
+        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 密钥仅存本机 localStorage（ge-llm-config-v1），不会上传到创世引擎服务器。<strong>当前服务端推演固定 rules_only</strong>；hybrid / full 选项为 C6 插口，保存后不会改变本轮 deduce 行为。</div>`,
       onOpen: (body) => {
         body.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => {
           GE.app.setQuality(b.dataset.q); GE.modal.close(); openSettings();
@@ -847,9 +847,15 @@ GE.panels = (function () {
         }
 
         body.querySelector('#btn-llm-save')?.addEventListener('click', () => {
-          saveCfg();
-          setStatus('已保存到本机', true);
-          GE.toast.success('设置已保存', '模型与世界 API 配置已写入本地。');
+          const cfg = saveCfg();
+          const mode = cfg && cfg.agentMode;
+          if (mode === 'hybrid' || mode === 'full') {
+            setStatus('已保存 · hybrid/full 为 C6 插口，当前推演仍走服务端 rules_only', true);
+            GE.toast.info('设置已保存', 'LLM 配置已落盘；真推演 hybrid 尚未接线，本轮仍为 rules_only。');
+          } else {
+            setStatus('已保存到本机', true);
+            GE.toast.success('设置已保存', '模型与世界 API 配置已写入本地。');
+          }
         });
         body.querySelector('#btn-llm-clear')?.addEventListener('click', () => {
           if (body.querySelector('#set-llm-key')) body.querySelector('#set-llm-key').value = '';
@@ -901,7 +907,12 @@ GE.panels = (function () {
 
         // 改动世界 API / 启用开关时即时落盘
         ['#set-world-api', '#set-run-id', '#set-llm-enabled', '#set-agent-mode'].forEach(sel => {
-          body.querySelector(sel)?.addEventListener('change', () => saveCfg());
+          body.querySelector(sel)?.addEventListener('change', () => {
+            const cfg = saveCfg();
+            if (sel === '#set-agent-mode' && cfg && (cfg.agentMode === 'hybrid' || cfg.agentMode === 'full')) {
+              setStatus('提示：hybrid/full 为 C6 预留，当前 deduce 固定 rules_only', true);
+            }
+          });
         });
       }
     });

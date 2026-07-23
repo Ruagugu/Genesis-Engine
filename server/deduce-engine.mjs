@@ -201,7 +201,13 @@ function buildFacilityBody(run, decision, rnd) {
   const civ = (run.civs || []).find(c => c.id === decision.civId);
   const tint = (civ && civ.color) || '#5fd6e6';
   const seq = run.facilitySeq[decision.civId] || 1;
-  const name = `${civ ? civ.short || civ.name : '未知'}·${slot.parent || '深空'}·${seq}`;
+  // 锚点用天体中文名，避免 UI 出现「晨曦·gaiya·1」
+  const parentBody = slot.parent
+    ? (run.discovered.bodies || []).find(b => b.id === slot.parent)
+    : null;
+  const anchor = (parentBody && parentBody.name) || (slot.parent ? String(slot.parent) : '深空');
+  const civLabel = (civ && (civ.short || civ.name)) || '未知';
+  const name = `${civLabel}·${anchor}·${seq}`;
 
   const a = slot.a;
   return {
