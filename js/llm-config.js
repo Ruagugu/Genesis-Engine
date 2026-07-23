@@ -1,7 +1,8 @@
 /* ============================================================
    创世引擎 · llm-config.js — 前端模型 / API 配置
    OpenAI 兼容：baseUrl + apiKey + model
-   可拉 /v1/models；推演 hybrid 时由 agent 层读取（C6 插口）。
+   本机 localStorage 缓存 + 保存到后端 GET/PUT /api/v1/llm-settings
+   推演 hybrid 时由服务端读取已存配置（不必每次随 deduce 带密钥）
    ============================================================ */
 window.GE = window.GE || {};
 
@@ -12,7 +13,7 @@ GE.llmConfig = (function () {
   const DEFAULTS = {
     enabled: false,
     agentMode: 'rules_only', // rules_only | hybrid | full
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: '',
     apiKey: '',
     model: '',
     models: [], // 最近一次 list 结果
@@ -20,7 +21,8 @@ GE.llmConfig = (function () {
     timeoutMs: 45000,
     // 世界 API（创世引擎自身）
     worldApiBase: '', // 空 = 同源
-    runId: 'local-seed'
+    runId: 'local-seed',
+    serverSyncedAt: null
   };
 
   let state = load();
@@ -48,7 +50,8 @@ GE.llmConfig = (function () {
         temperature: state.temperature,
         timeoutMs: state.timeoutMs,
         worldApiBase: state.worldApiBase || '',
-        runId: state.runId || 'local-seed'
+        runId: state.runId || 'local-seed',
+        serverSyncedAt: state.serverSyncedAt || null
       }));
     } catch (_) { /* ignore quota */ }
   }
@@ -67,6 +70,11 @@ GE.llmConfig = (function () {
       if (state.worldApiBase) {
         window.GE_API_BASE = state.worldApiBase;
         localStorage.setItem('ge-api-base', state.worldApiBase);
+      } else {
+        try { localStorage.removeItem('ge-api-base'); } catch (_) { /* ignore */ }
+        if (window.GE_API_BASE) {
+          // 仅在明确清空时去掉；避免误伤其它写入
+        }
       }
       if (state.runId) localStorage.setItem('ge-run-id', state.runId);
     } catch (_) { /* ignore */ }
@@ -88,6 +96,115 @@ GE.llmConfig = (function () {
       if (!/chat\/completions/i.test(u)) u = u + '/v1';
     }
     return u;
+  }
+
+  /** 世界 API 根（创世引擎后端） */
+  function worldBase() {
+    if (state.worldApiBase) return state.worldApiBase;
+    try {
+      if (GE.snapshot && typeof GE.snapshot.apiBase === 'function') {
+        const b = GE.snapshot.apiBase();
+        if (b) return b;
+      }
+    } catch (_) { /* ignore */ }
+    try {
+      if (typeof window !== 'undefined' && window.GE_API_BASE) return String(window.GE_API_BASE);
+    } catch (_) { /* ignore */ }
+    return '';
+  }
+
+  function runId() {
+    try {
+      const q = new URLSearchParams(location.search || '');
+      if (q.get('run')) return q.get('run');
+    } catch (_) { /* ignore */ }
+    return state.runId || 'local-seed';
+  }
+
+  function settingsUrl() {
+    const root = worldBase().replace(/\/$/, '');
+    return root + '/api/v1/llm-settings';
+  }
+
+  /**
+   * 从后端拉取已保存的 LLM 设置并合并到本机缓存
+   * @returns {Promise<{ ok:boolean, settings?:object, error?:string }>}
+   */
+  async function loadFromServer() {
+    const url = settingsUrl();
+    try {
+      const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { ok: false, error: data.error || data.message || `HTTP ${res.status}` };
+      }
+      set({
+        enabled: !!data.enabled,
+        agentMode: data.agentMode || 'rules_only',
+        baseUrl: data.baseUrl || '',
+        apiKey: data.apiKey || '',
+        model: data.model || '',
+        models: Array.isArray(data.models) ? data.models : state.models,
+        temperature: data.temperature != null ? data.temperature : state.temperature,
+        timeoutMs: data.timeoutMs != null ? data.timeoutMs : state.timeoutMs,
+        serverSyncedAt: data.updatedAt || new Date().toISOString()
+      });
+      return { ok: true, settings: get() };
+    } catch (err) {
+      const msg = /Failed to fetch|NetworkError|ERR_/i.test(String(err && err.message || err))
+        ? '网络失败：无法连接创世引擎后端（检查世界 API 根地址 / 是否已启动服务）'
+        : String(err && err.message || err);
+      return { ok: false, error: msg };
+    }
+  }
+
+  /**
+   * 将当前配置保存到后端（前端配置、后端落盘；无服务端手填）
+   * @param {object} [partial] 先合并再保存
+   * @returns {Promise<{ ok:boolean, settings?:object, error?:string, raw?:any }>}
+   */
+  async function saveToServer(partial) {
+    if (partial) set(partial);
+    const cfg = get();
+    const url = settingsUrl();
+    try {
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          enabled: !!cfg.enabled,
+          agentMode: cfg.agentMode || 'rules_only',
+          baseUrl: cfg.baseUrl || '',
+          apiKey: cfg.apiKey || '',
+          model: cfg.model || '',
+          models: Array.isArray(cfg.models) ? cfg.models.slice(0, 200) : [],
+          temperature: cfg.temperature,
+          timeoutMs: cfg.timeoutMs
+        }),
+        cache: 'no-store'
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { ok: false, error: data.error || data.message || `HTTP ${res.status}`, raw: data };
+      }
+      set({
+        enabled: data.enabled != null ? !!data.enabled : cfg.enabled,
+        agentMode: data.agentMode || cfg.agentMode,
+        baseUrl: data.baseUrl != null ? data.baseUrl : cfg.baseUrl,
+        apiKey: data.apiKey != null ? data.apiKey : cfg.apiKey,
+        model: data.model != null ? data.model : cfg.model,
+        models: Array.isArray(data.models) ? data.models : cfg.models,
+        temperature: data.temperature != null ? data.temperature : cfg.temperature,
+        timeoutMs: data.timeoutMs != null ? data.timeoutMs : cfg.timeoutMs,
+        serverSyncedAt: data.updatedAt || new Date().toISOString()
+      });
+      return { ok: true, settings: get(), raw: data };
+    } catch (err) {
+      const msg = /Failed to fetch|NetworkError|ERR_/i.test(String(err && err.message || err))
+        ? '网络失败：无法连接创世引擎后端（配置仅写入了本机缓存）'
+        : String(err && err.message || err);
+      return { ok: false, error: msg };
+    }
   }
 
   /**
@@ -151,7 +268,7 @@ GE.llmConfig = (function () {
   }
 
   /**
-   * OpenAI 兼容 chat.completions（供 C6 / 调试「试拉」）
+   * OpenAI 兼容 chat.completions（调试「试调用」；走浏览器直连供应商）
    */
   async function chat(messages, overrides) {
     const cfg = Object.assign({}, state, overrides || {});
@@ -207,26 +324,6 @@ GE.llmConfig = (function () {
     }
   }
 
-  /** 世界 API 根（创世引擎后端） */
-  function worldBase() {
-    if (state.worldApiBase) return state.worldApiBase;
-    try {
-      if (GE.snapshot && typeof GE.snapshot.apiBase === 'function') {
-        const b = GE.snapshot.apiBase();
-        if (b) return b;
-      }
-    } catch (_) { /* ignore */ }
-    return '';
-  }
-
-  function runId() {
-    try {
-      const q = new URLSearchParams(location.search || '');
-      if (q.get('run')) return q.get('run');
-    } catch (_) { /* ignore */ }
-    return state.runId || 'local-seed';
-  }
-
   // 启动时恢复 GE_API_BASE
   try {
     if (state.worldApiBase) window.GE_API_BASE = state.worldApiBase;
@@ -249,6 +346,9 @@ GE.llmConfig = (function () {
     chat,
     worldBase,
     runId,
-    normalizeBase
+    normalizeBase,
+    loadFromServer,
+    saveToServer,
+    settingsUrl
   };
 })();

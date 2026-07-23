@@ -9,5 +9,8 @@ playwright-report/
 test-results/
 qa/shots/
 
+# Frontend-saved LLM credentials (never commit)
+data/llm-settings.json
+
 # Local conversation exports
 对话记录*.md

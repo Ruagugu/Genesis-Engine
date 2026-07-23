@@ -11,6 +11,7 @@ import { loadGeData, root } from './load-ge-data.mjs';
 import * as runStore from './run-store.mjs';
 import { deduce } from './deduce-engine.mjs';
 import { ensureSurfaceOnRun } from './surface-ensure.mjs';
+import * as llmSettings from './llm-settings.mjs';
 
 const port = process.env.PORT ? Number(process.env.PORT) : 8123;
 const mime = {
@@ -90,14 +91,17 @@ const WRITE_ALLOWED = new Set([
   'POST /api/v1/runs/:id/deduce',
   'POST /api/v1/runs/:id/reset',
   'POST /api/v1/bodies/:id/surface/ensure',
-  'POST /api/v1/runs/:id/bodies/:bodyId/surface/ensure'
+  'POST /api/v1/runs/:id/bodies/:bodyId/surface/ensure',
+  'PUT /api/v1/llm-settings',
+  'POST /api/v1/llm-settings',
+  'DELETE /api/v1/llm-settings'
 ]);
 
 async function handleApi(req, res, urlPath) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Accept, Content-Type'
     });
     res.end();
@@ -107,6 +111,7 @@ async function handleApi(req, res, urlPath) {
   // ---------- health ----------
   if ((urlPath === '/api/v1/health' || urlPath === '/api/health') && req.method === 'GET') {
     const run = runStore.ensureDefault();
+    const llm = llmSettings.getPublic({ maskKey: true });
     json(res, 200, {
       ok: true,
       apiVersion: 'v1',
@@ -117,14 +122,76 @@ async function handleApi(req, res, urlPath) {
       writeAllow: [
         'POST /api/v1/runs',
         'POST /api/v1/runs/:id/deduce',
-        'POST /api/v1/bodies/:id/surface/ensure'
+        'POST /api/v1/bodies/:id/surface/ensure',
+        'PUT /api/v1/llm-settings'
       ],
       agentModes: ['rules_only', 'hybrid', 'full'],
-      agentMode: run.agentMode || 'rules_only',
+      agentMode: llm.agentMode || run.agentMode || 'rules_only',
+      llm: {
+        enabled: !!llm.enabled,
+        agentMode: llm.agentMode,
+        model: llm.model || '',
+        apiKeySet: !!llm.apiKeySet,
+        baseUrlSet: !!llm.baseUrl
+      },
       runId: run.id,
       revision: run.revision,
       year: run.year
     });
+    return true;
+  }
+
+  // ---------- LLM settings（仅前端表单写入；无服务端手填） ----------
+  if (urlPath === '/api/v1/llm-settings' && req.method === 'GET') {
+    // 本地单机：完整回填表单（含 key）。勿暴露到公网未鉴权部署。
+    json(res, 200, llmSettings.getPublic({ maskKey: false }));
+    return true;
+  }
+
+  if (urlPath === '/api/v1/llm-settings' && (req.method === 'PUT' || req.method === 'POST')) {
+    let body = {};
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      json(res, 400, { error: String(e.message || e) });
+      return true;
+    }
+    const saved = llmSettings.set({
+      enabled: body.enabled,
+      agentMode: body.agentMode,
+      baseUrl: body.baseUrl,
+      apiKey: body.apiKey,
+      model: body.model,
+      models: body.models,
+      temperature: body.temperature,
+      timeoutMs: body.timeoutMs
+    });
+    // 同步默认 run 的 agentMode 标签（推演仍以 forDeduce 为准）
+    try {
+      const run = runStore.ensureDefault();
+      run.agentMode = saved.agentMode || 'rules_only';
+    } catch (_) { /* ignore */ }
+    json(res, 200, {
+      ok: true,
+      saved: true,
+      enabled: saved.enabled,
+      agentMode: saved.agentMode,
+      baseUrl: saved.baseUrl,
+      model: saved.model,
+      apiKeySet: !!saved.apiKey,
+      temperature: saved.temperature,
+      timeoutMs: saved.timeoutMs,
+      updatedAt: saved.updatedAt,
+      // 回填用：前端保存后与本地缓存对齐
+      apiKey: saved.apiKey,
+      models: saved.models
+    });
+    return true;
+  }
+
+  if (urlPath === '/api/v1/llm-settings' && req.method === 'DELETE') {
+    const saved = llmSettings.reset();
+    json(res, 200, { ok: true, cleared: true, settings: llmSettings.getPublic({ maskKey: true }) });
     return true;
   }
 
@@ -291,22 +358,29 @@ async function handleApi(req, res, urlPath) {
       return true;
     }
     try {
-      // C6：前端可传 agentMode + llm（baseUrl/apiKey/model）；密钥不落盘
-      const llm = body.llm && typeof body.llm === 'object'
+      // C6：优先用前端已保存到后端的 LLM 设置；请求体可临时覆盖
+      const overrideLlm = body.llm && typeof body.llm === 'object'
         ? {
             baseUrl: String(body.llm.baseUrl || '').slice(0, 400),
-            apiKey: String(body.llm.apiKey || '').slice(0, 400),
-            model: String(body.llm.model || '').slice(0, 120),
+            apiKey: String(body.llm.apiKey || '').slice(0, 800),
+            model: String(body.llm.model || '').slice(0, 160),
             temperature: body.llm.temperature != null ? Number(body.llm.temperature) : undefined,
             timeoutMs: body.llm.timeoutMs != null ? Number(body.llm.timeoutMs) : undefined
           }
         : null;
+      const resolved = llmSettings.forDeduce({
+        agentMode: body.agentMode || null,
+        llm: overrideLlm
+      });
       const result = await deduce(run, {
         force: !!body.force,
         edict: body.edict || null,
-        agentMode: body.agentMode || null,
-        llm
+        agentMode: resolved.agentMode,
+        llm: resolved.llm
       });
+      if (result && result.agentMeta) {
+        result.agentMeta.configSource = resolved.source;
+      }
       json(res, 200, result);
     } catch (err) {
       console.error('[deduce]', err);
@@ -367,7 +441,7 @@ async function handleApi(req, res, urlPath) {
     if (req.method !== 'GET') {
       json(res, 405, {
         error: 'method_not_allowed',
-        message: 'Phase C write whitelist: POST /api/v1/runs, POST …/deduce, POST …/surface/ensure',
+        message: 'Phase C write whitelist: POST runs/deduce/ensure, PUT/POST /api/v1/llm-settings',
         path: urlPath
       });
       return true;
@@ -375,7 +449,7 @@ async function handleApi(req, res, urlPath) {
     json(res, 404, {
       error: 'not_found',
       path: urlPath,
-      hint: 'Phase C: /api/v1/health|snapshot|bodies|surfaces|runs|runs/:id/deduce'
+      hint: 'Phase C: /api/v1/health|snapshot|bodies|surfaces|runs|llm-settings|…/deduce'
     });
     return true;
   }
@@ -433,6 +507,7 @@ server.listen(port, () => {
   console.log(`[创世引擎] 阶段 C API + 静态 http://localhost:${port}`);
   console.log(`[创世引擎] snapshot  → GET  /api/v1/snapshot`);
   console.log(`[创世引擎] deduce    → POST /api/v1/runs/${runStore.DEFAULT_RUN_ID}/deduce`);
+  console.log(`[创世引擎] llm 设置 → GET/PUT /api/v1/llm-settings（仅前端表单写入）`);
 });
 
 export { server, runStore };

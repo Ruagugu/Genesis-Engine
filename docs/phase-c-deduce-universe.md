@@ -335,10 +335,10 @@ interface Run {
 
 ### C6 —（可选 C.2）LLM 插口
 
-- [x] Provider 接入 deduce（`server/llm-provider.mjs`；请求体带 `agentMode` + `llm`）
+- [x] Provider 接入 deduce（`server/llm-provider.mjs`；请求体可覆盖）
 - [x] Character 批量润色 + 可选 DetailFiller；超时 / 解析失败回落 rules_only
-- [x] 前端配置 UI + `js/llm-config.js` 存储 / listModels / chat；`runDeduction` 转发凭证
-- [x] 密钥仅随 deduce 转发、服务端不落盘；未启用 / 凭证不全 / 网络失败 → 规则引擎
+- [x] 前端配置 UI + `js/llm-config.js`；**保存到后端** `PUT /api/v1/llm-settings` → `data/llm-settings.json`（gitignore）
+- [x] 推演读取服务端已存设置（无需每次随 deduce 带密钥）；无环境变量手填；未启用 / 凭证不全 / 网络失败 → 规则引擎
 
 ---
 

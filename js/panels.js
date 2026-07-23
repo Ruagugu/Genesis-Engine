@@ -789,7 +789,7 @@ GE.panels = (function () {
             </select>
           </label>
           <label class="kv"><span class="k">Base URL</span>
-            <input id="set-llm-base" class="input mono" style="flex:1;min-width:0" placeholder="https://api.openai.com/v1" value="${esc(llm.baseUrl || '')}" />
+            <input id="set-llm-base" class="input mono" style="flex:1;min-width:0" placeholder="https://你的供应商/v1" value="${esc(llm.baseUrl || '')}" />
           </label>
           <label class="kv"><span class="k">API Key</span>
             <input id="set-llm-key" class="input mono" type="password" style="flex:1;min-width:0" placeholder="sk-…" value="${esc(llm.apiKey || '')}" autocomplete="off" />
@@ -811,8 +811,8 @@ GE.panels = (function () {
           </div>
           <div id="llm-status" class="mono" style="font-size:11.5px;color:var(--tx-2);min-height:1.4em;margin-top:4px"></div>
         </div>
-        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 密钥默认存本机 localStorage（ge-llm-config-v1）。选择 <strong>hybrid / full</strong> 并启用 LLM 后，推演请求会把 Base URL / Key / Model <strong>临时发给本机创世引擎后端</strong> 代调供应商（不落盘）；失败自动回落 rules_only。生产环境请自备代理，勿把长期密钥暴露在不可信网络。</div>`,
-      onOpen: (body) => {
+        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 在此填写 Base URL / Key / Model，点<strong>保存</strong>写入<strong>创世引擎后端</strong>（<code>data/llm-settings.json</code>，不进 git）。推演 hybrid/full 时服务端读取已存配置代调模型，无需每次随请求带密钥。本机 localStorage 仅作缓存。未启用或凭证不全时自动 rules_only。</div>`,
+      onOpen: async (body) => {
         body.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => {
           GE.app.setQuality(b.dataset.q); GE.modal.close(); openSettings();
         }));
@@ -838,7 +838,24 @@ GE.panels = (function () {
             runId: body.querySelector('#set-run-id')?.value?.trim() || 'local-seed'
           };
         }
-        function saveCfg(partial) {
+        function applyForm(cfg) {
+          if (!cfg) return;
+          const en = body.querySelector('#set-llm-enabled');
+          if (en) en.checked = !!cfg.enabled;
+          const mode = body.querySelector('#set-agent-mode');
+          if (mode && cfg.agentMode) mode.value = cfg.agentMode;
+          if (body.querySelector('#set-llm-base')) body.querySelector('#set-llm-base').value = cfg.baseUrl || '';
+          if (body.querySelector('#set-llm-key')) body.querySelector('#set-llm-key').value = cfg.apiKey || '';
+          if (body.querySelector('#set-llm-model')) body.querySelector('#set-llm-model').value = cfg.model || '';
+          if (body.querySelector('#set-llm-temp') && cfg.temperature != null) {
+            body.querySelector('#set-llm-temp').value = cfg.temperature;
+          }
+          const list = body.querySelector('#set-llm-model-list');
+          if (list && Array.isArray(cfg.models)) {
+            list.innerHTML = cfg.models.map(m => `<option value="${esc(m)}"></option>`).join('');
+          }
+        }
+        function saveLocal(partial) {
           if (!GE.llmConfig) {
             setStatus('llm-config 模块未加载', false);
             return null;
@@ -846,33 +863,67 @@ GE.panels = (function () {
           return GE.llmConfig.set(Object.assign(readForm(), partial || {}));
         }
 
-        body.querySelector('#btn-llm-save')?.addEventListener('click', () => {
-          const cfg = saveCfg();
-          const mode = cfg && cfg.agentMode;
-          if ((mode === 'hybrid' || mode === 'full') && cfg && cfg.enabled) {
-            if (!cfg.apiKey || !cfg.model || !cfg.baseUrl) {
-              setStatus('已保存 · hybrid/full 需填完整 Base URL / Key / Model，否则推演回落 rules_only', true);
-              GE.toast.info('设置已保存', '模式已记；凭证不齐时 deduce 自动用规则引擎。');
-            } else {
-              setStatus(`已保存 · 下次推演将以 ${mode} 调用模型（失败回落规则）`, true);
-              GE.toast.success('设置已保存', `推演模式 ${mode}；密钥仅随 deduce 请求转发，不写服务器磁盘。`);
-            }
-          } else if (mode === 'hybrid' || mode === 'full') {
-            setStatus('已保存 · 请打开「启用 LLM」后 hybrid/full 才会调模型', true);
-            GE.toast.info('设置已保存', '模式已记；未启用 LLM 时推演仍走 rules_only。');
+        // 打开设置时从后端拉取已存配置
+        if (GE.llmConfig && typeof GE.llmConfig.loadFromServer === 'function') {
+          setStatus('正在从后端同步 LLM 设置 …');
+          const synced = await GE.llmConfig.loadFromServer();
+          if (synced.ok) {
+            applyForm(synced.settings);
+            setStatus(synced.settings?.serverSyncedAt
+              ? `已同步后端设置 · ${synced.settings.serverSyncedAt}`
+              : '已同步后端设置', true);
           } else {
-            setStatus('已保存到本机', true);
-            GE.toast.success('设置已保存', '模型与世界 API 配置已写入本地。');
+            setStatus('后端未同步（' + (synced.error || 'unknown') + '）· 使用本机缓存', false);
+          }
+        }
+
+        body.querySelector('#btn-llm-save')?.addEventListener('click', async () => {
+          if (!GE.llmConfig) return;
+          saveLocal();
+          setStatus('正在保存到后端 …');
+          const btn = body.querySelector('#btn-llm-save');
+          if (btn) btn.disabled = true;
+          try {
+            const r = await GE.llmConfig.saveToServer();
+            if (!r.ok) {
+              setStatus('本机已缓存 · 后端失败：' + (r.error || ''), false);
+              GE.toast.warn('保存到后端失败', r.error || '');
+              return;
+            }
+            const cfg = r.settings || GE.llmConfig.get();
+            const mode = cfg.agentMode;
+            if ((mode === 'hybrid' || mode === 'full') && cfg.enabled) {
+              if (!cfg.apiKey || !cfg.model || !cfg.baseUrl) {
+                setStatus('已存后端 · hybrid/full 需填完整 Base URL / Key / Model，否则推演回落 rules_only', true);
+                GE.toast.info('已保存到后端', '凭证不齐时 deduce 自动用规则引擎。');
+              } else {
+                setStatus(`已存后端 · 推演将以 ${mode} 使用已存密钥（失败回落规则）`, true);
+                GE.toast.success('已保存到后端', `模式 ${mode} · 密钥仅存本机服务端文件，不进 git。`);
+              }
+            } else if (mode === 'hybrid' || mode === 'full') {
+              setStatus('已存后端 · 请打开「启用 LLM」后 hybrid/full 才会调模型', true);
+              GE.toast.info('已保存到后端', '模式已记；未启用时推演仍 rules_only。');
+            } else {
+              setStatus('已存后端 · rules_only', true);
+              GE.toast.success('已保存到后端', '模型与推演模式已写入服务端。');
+            }
+          } finally {
+            if (btn) btn.disabled = false;
           }
         });
-        body.querySelector('#btn-llm-clear')?.addEventListener('click', () => {
+        body.querySelector('#btn-llm-clear')?.addEventListener('click', async () => {
           if (body.querySelector('#set-llm-key')) body.querySelector('#set-llm-key').value = '';
-          saveCfg({ apiKey: '' });
-          setStatus('API Key 已清空', true);
+          saveLocal({ apiKey: '' });
+          if (GE.llmConfig && GE.llmConfig.saveToServer) {
+            const r = await GE.llmConfig.saveToServer({ apiKey: '' });
+            setStatus(r.ok ? 'API Key 已从后端清空' : '本机已清空 · 后端：' + (r.error || ''), r.ok);
+          } else {
+            setStatus('API Key 已清空', true);
+          }
         });
         body.querySelector('#btn-llm-fetch')?.addEventListener('click', async () => {
           if (!GE.llmConfig) return;
-          saveCfg();
+          saveLocal();
           setStatus('正在拉取 /models …');
           const btn = body.querySelector('#btn-llm-fetch');
           if (btn) btn.disabled = true;
@@ -890,7 +941,8 @@ GE.panels = (function () {
             if (r.models[0] && body.querySelector('#set-llm-model') && !body.querySelector('#set-llm-model').value) {
               body.querySelector('#set-llm-model').value = r.models[0];
             }
-            setStatus(`已拉取 ${r.models.length} 个模型`, true);
+            saveLocal();
+            setStatus(`已拉取 ${r.models.length} 个模型（记得点保存写入后端）`, true);
             GE.toast.success('模型列表已更新', `共 ${r.models.length} 个`);
           } finally {
             if (btn) btn.disabled = false;
@@ -898,7 +950,7 @@ GE.panels = (function () {
         });
         body.querySelector('#btn-llm-test')?.addEventListener('click', async () => {
           if (!GE.llmConfig) return;
-          saveCfg();
+          saveLocal();
           setStatus('试调用中 …');
           const r = await GE.llmConfig.chat(
             [{ role: 'user', content: '用一句话确认你已连通创世引擎。' }],
@@ -913,14 +965,12 @@ GE.panels = (function () {
           GE.toast.success('模型已连通', String(r.content || '').slice(0, 120));
         });
 
-        // 改动世界 API / 启用开关时即时落盘
+        // 改动世界 API 即时落本机；模式变更提示保存后端
         ['#set-world-api', '#set-run-id', '#set-llm-enabled', '#set-agent-mode'].forEach(sel => {
           body.querySelector(sel)?.addEventListener('change', () => {
-            const cfg = saveCfg();
+            const cfg = saveLocal();
             if (sel === '#set-agent-mode' && cfg && (cfg.agentMode === 'hybrid' || cfg.agentMode === 'full')) {
-              setStatus(cfg.enabled
-                ? `模式 ${cfg.agentMode}：推演时将尝试 LLM，失败回落规则`
-                : `模式 ${cfg.agentMode} 已记；请同时启用 LLM`, true);
+              setStatus(`模式 ${cfg.agentMode} 已记本机 · 点「保存」写入后端后推演生效`, true);
             }
           });
         });

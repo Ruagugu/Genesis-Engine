@@ -769,22 +769,16 @@ GE.app = (function () {
       force: !!opts.force,
       edict: opts.edict || null
     };
-    // C6：从本机 llmConfig 带上 agentMode +（可选）LLM 凭证；仅当启用且 hybrid/full 时附密钥
+    // C6：agentMode 告知偏好；LLM 凭证由服务端已存设置读取（前端「保存到后端」）
+    // 仅当显式 opts.llm 时才随请求临时覆盖（调试用）
     let cfg = null;
     try {
       cfg = GE.llmConfig && typeof GE.llmConfig.get === 'function' ? GE.llmConfig.get() : null;
     } catch (_) { cfg = null; }
     const mode = (opts.agentMode || (cfg && cfg.agentMode) || 'rules_only');
     payload.agentMode = mode;
-    if (cfg && cfg.enabled && (mode === 'hybrid' || mode === 'full')
-        && cfg.baseUrl && cfg.apiKey && cfg.model) {
-      payload.llm = {
-        baseUrl: cfg.baseUrl,
-        apiKey: cfg.apiKey,
-        model: cfg.model,
-        temperature: cfg.temperature,
-        timeoutMs: cfg.timeoutMs || 25000
-      };
+    if (opts.llm && typeof opts.llm === 'object') {
+      payload.llm = opts.llm;
     }
     return payload;
   }

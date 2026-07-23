@@ -203,6 +203,52 @@ test.describe('Phase C deduce API', () => {
     expect(body.lenses.政治).toBeTruthy();
     expect(body.round.llm.fallback).toBe('llm_error');
   });
+
+  test('LLM settings saved from frontend API are used by hybrid deduce', async ({ request }) => {
+    // 清空再写入（模拟前端表单保存）
+    await request.delete('/api/v1/llm-settings');
+    const put = await request.put('/api/v1/llm-settings', {
+      data: {
+        enabled: true,
+        agentMode: 'hybrid',
+        baseUrl: 'http://127.0.0.1:9',
+        apiKey: 'sk-from-frontend-form',
+        model: 'test-model',
+        temperature: 0.5,
+        timeoutMs: 2500
+      }
+    });
+    expect(put.ok()).toBeTruthy();
+    const saved = await put.json();
+    expect(saved.ok).toBe(true);
+    expect(saved.apiKeySet).toBe(true);
+    expect(saved.agentMode).toBe('hybrid');
+
+    const get = await request.get('/api/v1/llm-settings');
+    expect(get.ok()).toBeTruthy();
+    const cfg = await get.json();
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.apiKey).toBe('sk-from-frontend-form');
+    expect(cfg.model).toBe('test-model');
+
+    const rid = 'qa-llm-store-' + Date.now().toString(36);
+    await request.post('/api/v1/runs', { data: { id: rid, seed: 77, reset: true } });
+    // 不带 llm 体，仅 agentMode；服务端应用已存设置
+    const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
+      data: { agentMode: 'hybrid' }
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.agentMeta.requested).toBe('hybrid');
+    expect(body.agentMeta.configSource).toBe('server_store');
+    // 假地址应回落
+    expect(body.agentMeta.used).toBe('rules_only');
+    expect(body.agentMeta.fallback).toBe('llm_error');
+    expect(body.decisions.length).toBeGreaterThanOrEqual(5);
+
+    // 清理，避免污染其它用例
+    await request.delete('/api/v1/llm-settings');
+  });
 });
 
 test.describe('Phase C frontend deduce wiring', () => {
