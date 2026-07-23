@@ -53,7 +53,8 @@ GE.panels = (function () {
         { id: 'overview', label: '总览', icon: 'globe', render: (el) => renderCivOverview(el, c) },
         { id: 'tech', label: '科技树', icon: 'network', render: (el) => renderTechTree(el, c) },
         { id: 'people', label: '领袖与人物', icon: 'users', render: (el) => renderCivPeople(el, c) },
-        { id: 'realm', label: '疆域与资产', icon: 'hex', render: (el) => renderCivRealm(el, c) }
+        { id: 'realm', label: '疆域与资产', icon: 'hex', render: (el) => renderCivRealm(el, c) },
+        { id: 'warehouse', label: '国家仓储', icon: 'grid', render: (el) => renderWarehouse(el, c) }
       ]
     });
   }
@@ -268,34 +269,44 @@ GE.panels = (function () {
 
   /* ---------- 疆域与资产 ---------- */
   function renderCivRealm(el, c) {
-    const blocks = D().mapBlocks ? (D().mapBlocks.filter(b => b.归属 === c.name)) : [];
+    const summary = GE.worldState.getCivSummary(c.id);
     const orbital = c.orbital;
+    const regionNames = summary.regions.map(id => GE.worldState.getRegion(id).name).join('、') || '无';
     el.innerHTML = `
       ${secHead('hex', '地表疆域', c.capital)}
       <div class="card-grid cols-3">
-        ${bigstat('≈' + (Math.round(c.stats.扩张 * 3.2)) + '万', '疆域 · km²', 'hex', c.color)}
-        ${bigstat(c.capital, '首都', 'crown', c.color)}
-        ${bigstat(c.文明阶段, '文明阶段', 'pulses', c.color)}
+        ${bigstat(GE.fmt.num(summary.tiles.length), '受控战略地块', 'hex', c.color)}
+        ${bigstat('≈' + GE.fmt.compact(summary.areaKm2), '疆域 · km²', 'globe', c.color)}
+        ${bigstat(summary.buildings.length, '运行建筑', 'grid', c.color)}
       </div>
-      ${orbital ? secHead('satellite', '轨道资产', '晨曦联邦') + `
-      <div class="card-grid cols-3">
-        ${bigstat(orbital.satellites, '星链卫星', 'satellite', '#5fd6e6')}
-        ${bigstat(1, '轨道站', 'station', '#5fd6e6')}
-        ${bigstat(orbital.ships, '在轨舰船', 'ship', '#5fd6e6')}
-      </div>
-      <div class="panel" style="margin-top:12px;display:flex;align-items:center;gap:12px">
-        <span style="width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:rgba(95,214,230,.12);color:var(--cyan)">${ic('orbit', 18)}</span>
-        <div style="flex:1"><div style="font-weight:700;color:var(--tx-0)">${esc(orbital.station)}</div>
-        <div style="font-size:11px;color:var(--tx-2)">揽星计划神经中枢 · 星链星座调度</div></div>
-        <button class="btn btn-sm btn-cyan" id="btn-view-orbit">${ic('eye', 13)}在轨查看</button>
-      </div>` : ''}
-      ${blocks.length ? secHead('globe', '主要区块') + blocks.map(b => kv(b.name, `${b.地形} · ${b.状态}`)) : ''}
-      <div class="panel" style="margin-top:14px;border-left:3px solid ${c.color}">
-        <div style="font-size:11px;color:var(--tx-2);margin-bottom:4px">领土策略</div>
-        <p class="prose">${esc(c.发展计划)}</p>
-      </div>`;
-    const vb = el.querySelector('#btn-view-orbit');
-    if (vb) vb.addEventListener('click', () => { GE.modal.close(); GE.app.switchView('planet'); GE.views.planet.focusCapital(c.id); });
+      <div class="panel" style="margin-top:12px">${kv('覆盖地区', esc(regionNames))}${kv('主要产出', esc(Object.entries(summary.output).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([id,v])=>GE.data.strategicMap.resourceCatalog[id].name+' '+v).join(' · ') || '无'))}</div>
+      <div style="margin-top:12px"><button class="btn btn-gold" id="btn-open-warehouse">${ic('grid',14)}国家仓储</button><button class="btn" id="btn-focus-capital" style="margin-left:8px">${ic('target',14)}定位首都</button></div>
+      ${orbital ? secHead('satellite', '轨道资产', c.name) + `<div class="card-grid cols-3">${bigstat(orbital.satellites, '星链卫星', 'satellite', '#5fd6e6')}${bigstat(1, '轨道站', 'station', '#5fd6e6')}${bigstat(orbital.ships, '在轨舰船', 'ship', '#5fd6e6')}</div>` : ''}
+      <div class="panel" style="margin-top:14px;border-left:3px solid ${c.color}"><div style="font-size:11px;color:var(--tx-2);margin-bottom:4px">领土策略</div><p class="prose">${esc(c.发展计划)}</p></div>`;
+    el.querySelector('#btn-open-warehouse').addEventListener('click', () => openWarehouse(c.id));
+    el.querySelector('#btn-focus-capital').addEventListener('click', () => { GE.modal.close(); GE.app.switchView('planet'); GE.views.planet.focusCapital(c.id); });
+  }
+
+  function renderWarehouse(el, c) {
+    const warehouse = GE.worldState.getWarehouse(c.id), catalog = GE.data.strategicMap.resourceCatalog;
+    el.innerHTML = `${secHead('grid', '国家仓储', '战略资源流')}
+      <div class="panel" style="margin-bottom:14px"><p class="prose" style="font-size:12px">库存由受控战略地块的资源与建筑产出汇总；推演后将更新本轮产出、消耗与净变化。</p></div>
+      <div class="stagger">${Object.entries(catalog).map(([id,r]) => { const stock=warehouse.stock[id], cap=warehouse.capacity[id], net=warehouse.lastTurn.net[id] || 0, pct=Math.round(stock/cap*100); return `<div class="warehouse-row"><div class="wr-head"><span style="color:${r.color};font-weight:700">${esc(r.name)}</span><span class="mono">${stock} / ${cap}</span><span class="wr-net ${net>=0?'up':'down'}">${net>=0?'+':''}${net}</span></div><div class="meter"><i style="--m-color:${r.color};width:${pct}%"></i></div><div class="wr-meta">产出 ${warehouse.lastTurn.produced[id] || 0} · 消耗 ${warehouse.lastTurn.consumed[id] || 0} · ${pct < 25 ? '低储备警告' : pct > 92 ? '接近容量' : '储备稳定'}</div></div>`; }).join('')}</div>`;
+  }
+
+  function openWarehouse(civId) {
+    const c = civById(civId); if (!c) return;
+    GE.modal.open({ id:'warehouse-'+civId, title:c.name+' · 国家仓储', subtitle:'战略资源库存 · 产出与消耗', icon:'grid', accent:c.color, size:'xl', body:el=>renderWarehouse(el,c) });
+  }
+
+  function openRegion(regionId) {
+    const region = GE.worldState.getRegion(regionId); if (!region) return;
+    const tiles = GE.worldState.getTilesByRegion(regionId), owners = {};
+    tiles.forEach(t => { if (t.ownerCivId) owners[t.ownerCivId]=(owners[t.ownerCivId]||0)+1; });
+    GE.modal.open({ id:'region-'+regionId, title:region.name, subtitle:region.description, icon:'globe', accent:region.color, size:'xl', body:el=>{
+      el.innerHTML=`${secHead('hex','地区概览','地理层') }<div class="card-grid cols-3">${bigstat(tiles.length,'战略地块','hex',region.color)}${bigstat(tiles.filter(t=>t.terrain==='ocean'||t.terrain==='coast').length,'水域地块','water',region.color)}${bigstat(Object.keys(owners).length,'存在文明','flag',region.color)}</div><div class="panel" style="margin-top:14px">${Object.entries(owners).map(([id,n])=>kv(civById(id).name,n+' 块')).join('') || kv('归属','全域无主')}</div><button class="btn btn-gold" id="btn-focus-region" style="margin-top:14px">${ic('target',14)}定位地区</button>`;
+      el.querySelector('#btn-focus-region').addEventListener('click',()=>{ GE.modal.close(); GE.app.switchView('planet'); GE.views.planet.focusRegion(regionId); });
+    }});
   }
 
   /* ============================================================
@@ -825,6 +836,6 @@ GE.panels = (function () {
   /* ============ 导出 ============ */
   return {
     openCiv, openLeader, openStation, openPlanetInfo, openChronicle,
-    openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction
+    openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openWarehouse, openRegion
   };
 })();

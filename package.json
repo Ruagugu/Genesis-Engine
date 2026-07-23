@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "test:qa": "playwright test",
+    "qa:shots": "node qa/shoot.mjs"
+  },
   "devDependencies": {
     "playwright": "^1.61.1"
   }

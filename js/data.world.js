@@ -501,6 +501,44 @@ GE.data = (function () {
     { name:"曙光纪元", years:"进行中 · 已 1247 年", desc:"超光速壁垒将破，万邦仰望星空的时代。", current:true }
   ];
 
+  /* ---------- 战略地图基线（地形由确定性网格解析，变更以 stable tile ID 存储） ---------- */
+  const strategicMap = {
+    schemaVersion: 1,
+    topology: { kind: 'icosahedron-dual', frequency: 64, seed: 20260723, planetRadiusKm: 6371, nominalTileWidthKm: 120 },
+    regions: [
+      { id:'tian-shu-coast', name:'天枢海岸', color:'#4fd2ff', lat:18, lon:40, radius:30, description:'东部暖流海岸与联邦城邦带。' },
+      { id:'jin-hui-plain', name:'金辉平原', color:'#e6a948', lat:4, lon:-10, radius:34, description:'河网密布、铁与麦丰沛的中央平原。' },
+      { id:'cui-guan-forest', name:'翠冠圣林', color:'#6fd08c', lat:-32, lon:130, radius:36, description:'世界树根脉覆盖的古老林海。' },
+      { id:'long-ji-range', name:'龙脊山脉', color:'#d97b4f', lat:44, lon:-120, radius:30, description:'地火、矿脉与矮人锻炉构成的高山地带。' },
+      { id:'chao-ge-abyss', name:'潮歌深渊', color:'#7f8cf0', lat:-58, lon:-60, radius:32, description:'深海裂谷与鲛人渊城所在的永夜海域。' },
+      { id:'bei-jing-tundra', name:'北境冻原', color:'#b6c8de', lat:72, lon:15, radius:38, description:'冰封苔原、极光与古老遗迹交织的北境。' },
+      { id:'chi-sha-basin', name:'赤沙盆地', color:'#d68b52', lat:-12, lon:80, radius:28, description:'高温干旱的红砂盆地，蕴藏燃料与灵晶。' },
+      { id:'xi-yang-isles', name:'西洋群岛', color:'#5fa6c4', lat:12, lon:-150, radius:30, description:'火山岛弧与海上贸易航道。' }
+    ],
+    terrainCatalog: {
+      ice:{ name:'冰原', color:'#e6eef6', elevation:'冰盖' }, tundra:{ name:'冻土', color:'#a8b294', elevation:'低地' },
+      desert:{ name:'沙漠', color:'#dcc388', elevation:'盆地' }, plains:{ name:'平原', color:'#86ab6b', elevation:'低地' },
+      forest:{ name:'森林', color:'#4f8458', elevation:'丘陵' }, hills:{ name:'丘陵', color:'#9a9a72', elevation:'高地' },
+      mountain:{ name:'山脉', color:'#8d929c', elevation:'山地' }, coast:{ name:'海岸', color:'#2f6d88', elevation:'海平面' }, ocean:{ name:'海洋', color:'#14304a', elevation:'深海' }
+    },
+    resourceCatalog: {
+      food:{ name:'粮食', color:'#d8b76a', unit:'储量', icon:'wheat' }, biomass:{ name:'生物质', color:'#6fd08c', unit:'储量', icon:'tree' },
+      materials:{ name:'石材建材', color:'#a7a09a', unit:'储量', icon:'grid' }, metals:{ name:'金属', color:'#d97b4f', unit:'储量', icon:'gem' },
+      rareMinerals:{ name:'稀有矿物', color:'#8b7cf6', unit:'储量', icon:'sparkle' }, fuel:{ name:'燃料', color:'#e8a15c', unit:'储量', icon:'flask' },
+      energy:{ name:'能源', color:'#5fd6e6', unit:'能量', icon:'bolt' }, essence:{ name:'灵质', color:'#b880e8', unit:'灵质', icon:'pulses' }
+    },
+    buildingCatalog: {
+      granary:{ name:'粮仓群', icon:'grid', outputs:{ food:4 }, capacity:{ food:90 } },
+      forge:{ name:'符文锻炉', icon:'gem', outputs:{ metals:4, materials:1 }, capacity:{ metals:60 } },
+      grove:{ name:'根脉庭园', icon:'tree', outputs:{ biomass:3, essence:2 } },
+      port:{ name:'深水港', icon:'ship', outputs:{ food:1, fuel:1 }, capacity:{ fuel:50 } },
+      extractor:{ name:'深层采掘站', icon:'flask', outputs:{ rareMinerals:3, fuel:2 } },
+      reactor:{ name:'聚变反应堆', icon:'bolt', outputs:{ energy:6 }, capacity:{ energy:120 } }
+    },
+    capitalSeeds: { dawn:{ lat:18, lon:40 }, aurel:{ lat:4, lon:-10 }, sylva:{ lat:-32, lon:130 }, bronze:{ lat:44, lon:-120 }, abyss:{ lat:-58, lon:-60 } },
+    claimRadius: { dawn:16, aurel:21, sylva:15, bronze:12, abyss:18 }
+  };
+
   return { world, civLevels, energyScale, civs, races, transcendent, favorites,
-           chronicle, thresholds, spaceBodies, relations, legacies, eraCausal, deduction, eras };
+           chronicle, thresholds, spaceBodies, relations, legacies, eraCausal, deduction, eras, strategicMap };
 })();

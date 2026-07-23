@@ -19,7 +19,7 @@ GE.app = (function () {
     playing: true,
     speedIndex: 2,
     speeds: [0, 0.25, 1, 4, 16],
-    layer: { labels: true, grid: true, orbit: true, coverage: true, atmo: true },
+    layer: { labels: true, grid: true, regions: true, ownership: true, assets: true, orbit: true, coverage: true, atmo: true },
     initialized: Object.create(null),
     started: false,
     deductionRound: GE.data.deduction.log[0].round,
@@ -221,15 +221,16 @@ GE.app = (function () {
 
   function updateLayerToolbar(id) {
     const config = {
-      planet: { labels: ['地名标注', 'message'], grid: ['地块网格', 'hex'], orbit: ['轨道与卫星', 'orbit'], coverage: ['星链覆盖圈', 'radar'], atmo: ['大气层', 'layers'] },
-      universe: { labels: ['天体标注', 'message'], grid: ['小行星带', 'grid'], orbit: ['星轨与宜居带', 'orbit'], coverage: ['深空网格', 'radar'], atmo: ['天体辉光', 'layers'] },
-      blackhole: { labels: ['观测标注', 'message'], grid: ['参考网格', 'grid'], orbit: ['吸积盘', 'orbit'], coverage: ['光子环增强', 'radar'], atmo: ['HDR Bloom', 'sparkle'] }
+      planet: { labels: ['地名标注', 'message'], grid: ['战略网格', 'hex'], regions: ['地区色彩与边界', 'globe'], ownership: ['国家归属', 'flag'], assets: ['建筑与资源', 'gem'], orbit: ['轨道与卫星', 'orbit'], coverage: ['星链覆盖圈', 'radar'], atmo: ['大气层', 'layers'] },
+      universe: { labels: ['天体标注', 'message'], grid: ['小行星带', 'grid'], regions: ['地区', 'globe'], ownership: ['归属', 'flag'], assets: ['资产', 'gem'], orbit: ['星轨与宜居带', 'orbit'], coverage: ['深空网格', 'radar'], atmo: ['天体辉光', 'layers'] },
+      blackhole: { labels: ['观测标注', 'message'], grid: ['参考网格', 'grid'], regions: ['地区', 'globe'], ownership: ['归属', 'flag'], assets: ['资产', 'gem'], orbit: ['吸积盘', 'orbit'], coverage: ['光子环增强', 'radar'], atmo: ['HDR Bloom', 'sparkle'] }
     }[id];
     Object.entries(config).forEach(([k, cfg]) => {
       const b = document.getElementById('lb-' + k);
       b.dataset.tip = cfg[0];
       b.innerHTML = GE.icons.icon(cfg[1], 16);
-      const unavailable = (id === 'universe' && k === 'coverage') || (id === 'blackhole' && (k === 'labels' || k === 'grid' || k === 'coverage'));
+      const unavailable = (id !== 'planet' && (k === 'regions' || k === 'ownership' || k === 'assets')) ||
+        (id === 'universe' && k === 'coverage') || (id === 'blackhole' && (k === 'labels' || k === 'grid' || k === 'coverage'));
       b.disabled = unavailable;
       b.style.display = unavailable ? 'none' : '';
     });
@@ -247,7 +248,7 @@ GE.app = (function () {
     labelHost.style.display = visible ? '' : 'none';
     labelHost.querySelectorAll('.map-label').forEach(el => {
       const id = el.dataset.label || '';
-      const belongs = state.view === 'planet' ? (id.startsWith('cap-') || id === 'station') :
+      const belongs = state.view === 'planet' ? (id.startsWith('cap-') || id.startsWith('region-') || id === 'station') :
                       state.view === 'universe' ? id.startsWith('u-') : false;
       el.style.visibility = belongs ? 'visible' : 'hidden';
     });
@@ -420,26 +421,15 @@ GE.app = (function () {
     });
   }
 
-  function showHexInfo(hex) {
-    const terrainNames = { ice: '冰原', tundra: '冻土', desert: '沙漠', plains: '平原', forest: '森林', hills: '丘陵', mountain: '山脉', coast: '海岸', ocean: '海洋' };
-    ctxInner.innerHTML = `
-      <header class="ctx-head" style="--ctx-c:var(--gold)">
-        <button class="ctx-close" id="ctx-close-hex" aria-label="关闭详情">${GE.icons.icon('x', 14)}</button>
-        <div class="ctx-kicker">${GE.icons.icon('hex', 12)}地表区块 · 未编号</div>
-        <div class="ctx-title">${terrainNames[hex.type] || '未知地形'}</div>
-        <div class="ctx-sub">无主之地 · 尚未被文明纳入统治</div>
-      </header>
-      <div class="ctx-body">
-        ${GE.panels ? '' : ''}
-        <div class="ctx-stats">
-          <div class="ctx-stat"><div class="cs-num">${Math.round(hex.pos.x)}</div><div class="cs-label">X 坐标</div></div>
-          <div class="ctx-stat"><div class="cs-num">${Math.round(hex.pos.y)}</div><div class="cs-label">Y 坐标</div></div>
-          <div class="ctx-stat"><div class="cs-num">${Math.round(hex.pos.z)}</div><div class="cs-label">Z 坐标</div></div>
-        </div>
-        <div class="panel"><p class="prose" style="font-size:12px">该区块尚未建立稳定政权。探索、殖民或战争可能改变其归属；坐标一经确立，除非发生空间扭曲或地壳迁移，将保持不变。</p></div>
-      </div>`;
-    ctxPanel.hidden = false;
-    ctxInner.querySelector('#ctx-close-hex').addEventListener('click', clearSelection);
+  function showTileContext(tileId) {
+    const tile = GE.worldState.getTile(tileId); if (!tile) return;
+    const map = GE.data.strategicMap, terrain = map.terrainCatalog[tile.terrain], region = GE.worldState.getRegion(tile.regionId);
+    const civ = tile.ownerCivId && GE.data.civs.find(c => c.id === tile.ownerCivId);
+    const rows = tile.resources.map(r => `${map.resourceCatalog[r.resourceId].name} · 丰度 ${r.richness}`).join('<br>') || '无显著产出';
+    ctxInner.innerHTML = `<header class="ctx-head" style="--ctx-c:${region.color}"><button class="ctx-close" id="ctx-close-tile" aria-label="关闭详情">${GE.icons.icon('x',14)}</button><div class="ctx-kicker">${GE.icons.icon('hex',12)}战略地块 · ${tile.kind === 'pentagon' ? '五边' : '六边'}</div><div class="ctx-title">${terrain.name}</div><div class="ctx-sub">${tile.id} · 约 ${map.topology.nominalTileWidthKm} km</div></header><div class="ctx-body"><div class="ctx-stats"><div class="ctx-stat"><div class="cs-num">${tile.neighbors.length}</div><div class="cs-label">相邻地块</div></div><div class="ctx-stat"><div class="cs-num">${tile.buildings.length}</div><div class="cs-label">建筑</div></div><div class="ctx-stat"><div class="cs-num">${tile.resources.length}</div><div class="cs-label">资源</div></div></div><div class="panel"><div class="kv"><span class="k">地区</span><span class="v" style="color:${region.color}">${region.name}</span></div><div class="kv"><span class="k">归属</span><span class="v">${civ ? civ.name : '无主'}</span></div><div class="kv"><span class="k">状态</span><span class="v">${tile.status}</span></div><div class="kv"><span class="k">产出</span><span class="v">${rows}</span></div></div></div><div class="ctx-actions"><button class="btn" id="ctx-region">地区</button>${civ ? `<button class="btn btn-gold" id="ctx-warehouse">国家仓储</button>` : ''}</div>`;
+    ctxPanel.hidden=false; ctxInner.querySelector('#ctx-close-tile').addEventListener('click',clearSelection);
+    ctxInner.querySelector('#ctx-region').addEventListener('click',()=>GE.panels.openRegion(region.id));
+    const wh=ctxInner.querySelector('#ctx-warehouse'); if(wh) wh.addEventListener('click',()=>GE.panels.openWarehouse(civ.id));
   }
 
   function showBodyCard(body) {
@@ -515,6 +505,7 @@ GE.app = (function () {
     GE.data.deduction.log.unshift(log);
 
     if (!opts.edict) {
+      const strategicRevision = GE.worldState.advanceTurn();
       const tech = GE.data.civs[0].科技树.节点['亚光速引擎'];
       tech.进度 = Math.min(100, tech.进度 + 7);
       GE.data.civs[0].科技树.下一阶段 = Math.min(100, GE.data.civs[0].科技树.下一阶段 + 3);
@@ -547,9 +538,15 @@ GE.app = (function () {
         if (state.initialized[id] && v.rig) v.rig.autoRotate = value ? (id === 'planet' ? 0.03 : id === 'universe' ? 0.012 : 0.05) : 0;
       });
     }
-    if (key === 'cityLights' && GE.views.planet._built && GE.views.planet.scene) {
-      const pts = GE.views.planet.scene.children.find(o => o.type === 'Points');
-      if (pts) pts.visible = value;
+    if (key === 'cityLights') {
+      // 城市夜光已并入战略资产层；保留设置项以兼容现有 UI。
+      if (state.layer.assets !== value) {
+        state.layer.assets = value;
+        const btn = document.getElementById('lb-assets');
+        if (btn) { btn.classList.toggle('on', value); btn.classList.toggle('off', !value); }
+        const v = GE.views[state.view];
+        if (v && v.setLayer) v.setLayer('assets', value);
+      }
     }
     GE.toast.info('设置已更新', value ? '该表现选项已启用。' : '该表现选项已关闭。');
   }
@@ -560,7 +557,7 @@ GE.app = (function () {
     selectCiv,
     clearSelection,
     showCivContext,
-    showHexInfo,
+    showTileContext,
     showBodyCard,
     showHoverCard,
     hideHoverCard,

@@ -91,6 +91,12 @@
 /* 视图切换淡入 */
 .view-fade{animation:fadeIn .5s var(--ez)}
 
+
 /* 载入 spinner */
-.spinner{width:20px;height:20px;border-radius:99px;border:2px solid rgba(255,255,255,.15);
-  border-top-color:var(--cyan);animation:spin .8s linear infinite}
+.spinner{width:20px;height:20px;border-radius:99px;border:2px solid rgba(255,255,255,.15);border-top-color:var(--cyan);animation:spin .8s linear infinite}
+
+/* ============ 战略地图 / 国家仓储 ============ */
+.warehouse-row{padding:12px 0;border-bottom:1px solid var(--line-soft)}
+.warehouse-row:last-child{border-bottom:0}.wr-head{display:flex;align-items:center;gap:10px;font-size:12px;margin-bottom:6px}.wr-head .mono{margin-left:auto;color:var(--tx-0)}
+.wr-net{font-family:var(--f-mono);font-size:11px;min-width:38px;text-align:right}.wr-net.up{color:var(--green)}.wr-net.down{color:var(--red)}
+.wr-meta{font-size:10.5px;color:var(--tx-2);margin-top:5px}
