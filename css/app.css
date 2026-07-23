@@ -163,7 +163,7 @@
   z-index:15;border-radius:var(--r-lg);overflow:hidden;display:flex;flex-direction:column;
   animation:slideR .34s var(--ez);
 }
-#ctx-inner{overflow-y:auto;display:flex;flex-direction:column}
+#ctx-inner{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column}
 
 /* ============ 底栏 ============ */
 #bottombar{

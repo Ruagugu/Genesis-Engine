@@ -18,6 +18,20 @@ const browser = await chromium.launch({
 });
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
 page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+
+async function assertScrollable(selector, label) {
+  const metrics = await page.locator(selector).evaluate(el => ({
+    clientHeight: el.clientHeight,
+    scrollHeight: el.scrollHeight,
+    start: el.scrollTop
+  }));
+  if (metrics.scrollHeight <= metrics.clientHeight) {
+    throw new Error(`${label} 未产生垂直溢出（${metrics.scrollHeight} <= ${metrics.clientHeight}）`);
+  }
+  await page.locator(selector).evaluate(el => { el.scrollTop = el.scrollHeight; });
+  const end = await page.locator(selector).evaluate(el => el.scrollTop);
+  if (end <= metrics.start) throw new Error(`${label} 无法滚动到底部`);
+}
 page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
 page.on('requestfailed', r => { if (!r.url().includes('fonts.g')) warnings.push('REQFAIL: ' + r.url()); });
 
@@ -101,11 +115,20 @@ await step('14 大事记', async () => {
   await page.click('#btn-chronicle'); await sleep(700); await shot('14-chronicle');
 });
 
+await step('14b 短视窗大事记滚动', async () => {
+  await page.setViewportSize({ width: 1280, height: 600 }); await sleep(300);
+  const frameHeight = await page.locator('.modal-frame').evaluate(el => el.getBoundingClientRect().height);
+  if (frameHeight > 600 * 0.92 + 1) throw new Error(`大事记模态超出视窗高度（${frameHeight}px）`);
+  await assertScrollable('.modal-body', '大事记内容');
+});
+
 await step('15 典籍·门槛科技', async () => {
   await esc(); await sleep(350);
   await page.click('#btn-codex'); await sleep(500);
   await page.click('.modal-tab[data-tab="threshold"]'); await sleep(600); await shot('15-codex-threshold');
 });
+
+await step('15b 典籍内容滚动', () => assertScrollable('.modal-body', '典籍内容'));
 
 await step('16 典籍·超凡体系', async () => {
   await page.click('.modal-tab[data-tab="trans"]'); await sleep(600); await shot('16-codex-trans');
@@ -118,6 +141,21 @@ await step('17 典籍·种族', async () => {
 await step('18 收藏夹', async () => {
   await esc(); await sleep(350);
   await page.click('#btn-favorites'); await sleep(700); await shot('18-favorites');
+});
+
+await step('18b 右侧上下文滚动', async () => {
+  await esc(); await sleep(250);
+  await page.click('#civ-card-dawn'); await sleep(350);
+  const panelHeight = await page.locator('#ctx-panel').evaluate(el => el.getBoundingClientRect().height);
+  if (panelHeight > 600 - 28) throw new Error(`右侧上下文面板超出短视窗（${panelHeight}px）`);
+  const inner = page.locator('#ctx-inner');
+  await inner.evaluate((el, height) => {
+    if (el.scrollHeight <= el.clientHeight) {
+      el.append(document.assign(document.createElement('div'), { style: `height:${height}px;flex-shrink:0` }));
+    }
+  }, 800);
+  await assertScrollable('#ctx-inner', '右侧上下文内容');
+  await inner.evaluate(el => el.lastElementChild?.remove());
 });
 
 await step('19 神谕', async () => {
