@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="创世引擎 · Agent 多文明世界模拟推演 — 星球与宇宙的实时沙盒">
+<meta name="theme-color" content="#04060c">
+<title>创世引擎 · GENESIS ENGINE</title>
+
+<!-- 字体：衬线标题 + 无衬线正文 + 等宽数据 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;600;700;900&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/components.css">
+<link rel="stylesheet" href="css/views.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='9' fill='none' stroke='%23d8b76a' stroke-width='1.6'/%3E%3Cellipse cx='12' cy='12' rx='11' ry='4' fill='none' stroke='%235fd6e6' stroke-width='1.4' transform='rotate(-24 12 12)'/%3E%3Ccircle cx='12' cy='12' r='2.4' fill='%23d8b76a'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- 背景氛围层 -->
+<div id="nebula" aria-hidden="true"></div>
+
+<!-- 主 3D 画布（星球 / 宇宙 / 黑洞 共用单一渲染器） -->
+<canvas id="gl" aria-label="三维星图画布"></canvas>
+
+<!-- 电影化暗角 + 细网格 覆盖层 -->
+<div id="vignette" aria-hidden="true"></div>
+
+<!-- 3D 投影标签层 -->
+<div id="map-labels" aria-hidden="true"></div>
+
+<!-- 顶部状态栏 -->
+<header id="topbar">
+  <div id="brand" class="glass">
+    <div id="brand-mark" aria-hidden="true"></div>
+    <div id="brand-txt">
+      <div id="brand-name" class="serif">创世引擎</div>
+      <div id="brand-sub" class="tk">GENESIS ENGINE</div>
+    </div>
+  </div>
+
+  <div id="world-strip" class="glass" role="region" aria-label="世界状态">
+    <button class="ws-item" id="ws-era" data-tip="当前纪元与世界态势">
+      <span class="ws-ic" data-ic="calendar"></span>
+      <span class="ws-txt"><b id="ws-era-name" class="serif">—</b><i id="ws-era-num" class="mono">—</i></span>
+    </button>
+    <span class="ws-sep"></span>
+    <button class="ws-item" id="ws-year" data-tip="世界总年数 · 点击进入推演控制台">
+      <span class="ws-ic" data-ic="history"></span>
+      <span class="ws-txt"><b id="ws-year-num" class="mono">0</b><i>世界年</i></span>
+    </button>
+    <span class="ws-sep"></span>
+    <button class="ws-item" id="ws-energy" data-tip="世界能级 · 超凡力量背景浓度">
+      <span class="ws-ic" data-ic="bolt"></span>
+      <span class="ws-txt"><b id="ws-energy-num" class="mono">0</b><i id="ws-energy-tier">能级</i></span>
+      <span class="ws-meter" id="ws-energy-meter"><i></i></span>
+    </button>
+    <span class="ws-sep"></span>
+    <button class="ws-item" id="ws-civs" data-tip="当前活跃文明数量">
+      <span class="ws-ic" data-ic="flag"></span>
+      <span class="ws-txt"><b id="ws-civ-num" class="mono">0</b><i>文明</i></span>
+    </button>
+    <span class="ws-sep"></span>
+    <button class="ws-item" id="ws-planet" data-tip="母星 · 点击定位">
+      <span class="ws-ic" data-ic="globe"></span>
+      <span class="ws-txt"><b id="ws-planet-name">盖亚</b><i>母星</i></span>
+    </button>
+  </div>
+
+  <div id="top-actions">
+    <button id="btn-edict" class="ta-btn ta-edict" data-tip="神谕 · 以至高权限干涉世界">
+      <span data-ic="hand"></span><span class="ta-label">神谕</span>
+    </button>
+    <button id="btn-deduce" class="ta-btn ta-deduce" data-tip="推演控制台 · 多 Agent 决策与世界推演">
+      <span data-ic="brain"></span><span class="ta-label">推演</span>
+      <span class="ta-pulse" aria-hidden="true"></span>
+    </button>
+    <div id="notify-wrap">
+      <button id="btn-notify" class="ta-btn" aria-label="通知中心" aria-expanded="false">
+        <span data-ic="bell"></span>
+        <span id="notify-badge" class="hidden">0</span>
+      </button>
+      <div id="notify-panel" class="glass" hidden>
+        <div class="notify-head">
+          <span class="tk">通知中心</span>
+          <button id="notify-clear" class="mini-btn">清空</button>
+        </div>
+        <div id="notify-list"></div>
+      </div>
+    </div>
+    <button id="btn-settings" class="ta-btn" aria-label="设置"><span data-ic="gear"></span></button>
+  </div>
+</header>
+
+<!-- 左侧文明坞 -->
+<aside id="civ-dock" aria-label="文明列表">
+  <div class="dock-head">
+    <span class="dock-title tk">诸文明</span>
+    <span class="dock-count mono" id="dock-count">0</span>
+  </div>
+  <div id="civ-list" class="dock-scroll"></div>
+  <div class="dock-foot">
+    <button id="btn-codex" class="dock-foot-btn" data-tip="世界典籍 · 种族 / 超凡 / 门槛科技">
+      <span data-ic="book"></span><span>典籍</span>
+    </button>
+    <button id="btn-chronicle" class="dock-foot-btn" data-tip="大事记 · 不可篡改的世界史">
+      <span data-ic="history"></span><span>大事记</span>
+    </button>
+    <button id="btn-favorites" class="dock-foot-btn" data-tip="收藏夹 · 被注视的个体">
+      <span data-ic="star"></span><span>收藏</span>
+    </button>
+  </div>
+</aside>
+
+<!-- 右侧上下文面板 -->
+<aside id="ctx-panel" class="glass" aria-label="详情面板" hidden>
+  <div id="ctx-inner"></div>
+</aside>
+
+<!-- 底部控制栏 -->
+<footer id="bottombar">
+  <nav id="view-switch" class="glass" aria-label="视图切换">
+    <button class="vs-btn on" id="vs-planet" data-view="planet" data-tip="星球地图 · 地表文明与轨道设施">
+      <span data-ic="globe"></span><span class="vs-label">星球</span>
+    </button>
+    <button class="vs-btn" id="vs-universe" data-view="universe" data-tip="宇宙地图 · 曦阳星系与星轨">
+      <span data-ic="universe"></span><span class="vs-label">宇宙</span>
+    </button>
+    <button class="vs-btn" id="vs-blackhole" data-view="blackhole" data-tip="深渊之瞳 · 史瓦西黑洞实时引力透镜">
+      <span data-ic="blackhole"></span><span class="vs-label">黑洞</span>
+    </button>
+  </nav>
+
+  <div id="layer-bar" class="glass" role="toolbar" aria-label="图层控制">
+    <button class="lb-btn on" id="lb-labels" data-tip="地名标注"><span data-ic="message"></span></button>
+    <button class="lb-btn on" id="lb-grid" data-tip="地块网格"><span data-ic="hex"></span></button>
+    <button class="lb-btn on" id="lb-orbit" data-tip="轨道线"><span data-ic="orbit"></span></button>
+    <button class="lb-btn on" id="lb-coverage" data-tip="星链覆盖圈"><span data-ic="radar"></span></button>
+    <button class="lb-btn on" id="lb-atmo" data-tip="大气层"><span data-ic="layers"></span></button>
+  </div>
+
+  <div id="time-bar" class="glass" role="toolbar" aria-label="时间控制">
+    <button class="tb-btn" id="tb-slower" data-tip="减缓流逝"><span data-ic="chevL"></span></button>
+    <button class="tb-btn tb-play" id="tb-play" data-tip="暂停 / 继续" aria-pressed="true"><span data-ic="pause"></span></button>
+    <button class="tb-btn" id="tb-faster" data-tip="加速流逝"><span data-ic="chevR"></span></button>
+    <span class="tb-sep"></span>
+    <div id="tb-speed" class="mono" data-tip="时间流速">1.0×</div>
+    <button class="tb-advance" id="tb-advance" data-tip="推进一轮世界推演">
+      <span data-ic="ff"></span><span>推进推演</span>
+    </button>
+  </div>
+</footer>
+
+<!-- 对象悬停名片 -->
+<div id="hover-card" class="glass" hidden></div>
+
+<!-- 胶片颗粒 -->
+<div id="grain" aria-hidden="true"></div>
+
+<!-- 启动遮罩 -->
+<div id="boot" role="status" aria-label="载入中">
+  <div id="boot-inner">
+    <div id="boot-mark"></div>
+    <div id="boot-name" class="serif">创世引擎</div>
+    <div id="boot-sub" class="tk-2">GENESIS ENGINE</div>
+    <div id="boot-bar"><i id="boot-fill"></i></div>
+    <div id="boot-status" class="mono">正在初始化世界 …</div>
+  </div>
+</div>
+
+<!-- 引擎与模块 -->
+<script src="vendor/three.min.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/data.world.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/three-common.js"></script>
+<script src="js/view.planet.js"></script>
+<script src="js/view.universe.js"></script>
+<script src="js/view.blackhole.js"></script>
+<script src="js/panels.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

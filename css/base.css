@@ -1,0 +1,213 @@
+/* ============================================================
+   创世引擎 · GENESIS ENGINE
+   base.css — 设计基石：令牌 / 字体 / 复位 / 工具 / 动效库
+   美学：文明6 的信息密度 × 星图控制台的深邃奢华
+   ============================================================ */
+
+/* ---------- 设计令牌 ---------- */
+:root {
+  /* 背景层级（深邃太空，非纯黑） */
+  --bg-0:#04060c;
+  --bg-1:#070b15;
+  --bg-2:#0b1120;
+  --bg-3:#101a2e;
+
+  /* 面板与描边 */
+  --panel:        rgba(14,20,35,.78);
+  --panel-2:      rgba(18,26,45,.82);
+  --panel-solid:  #0d1526;
+  --panel-hi:     rgba(36,48,78,.55);
+  --line:         rgba(216,183,106,.16);   /* 金丝描边 */
+  --line-2:       rgba(216,183,106,.30);
+  --line-soft:    rgba(140,165,210,.12);
+  --line-cyan:    rgba(95,214,230,.22);
+
+  /* 品牌色 */
+  --gold:   #d8b76a;
+  --gold-2: #f2dda1;
+  --gold-3: #8f6f2f;
+  --cyan:   #5fd6e6;
+  --cyan-2: #9decf6;
+  --violet: #8b7cf6;
+  --green:  #6fd08c;
+  --red:    #e56b6b;
+  --orange: #e8a15c;
+
+  /* 文本 */
+  --tx-0:#f3ecda;   /* 主文本（暖白） */
+  --tx-1:#bcc4d8;   /* 次文本 */
+  --tx-2:#7f8aa6;   /* 弱化 */
+  --tx-3:#57618a;   /* 极弱 */
+
+  /* 文明色板（与 data.world.js 对齐） */
+  --civ-dawn:   #4fd2ff;
+  --civ-aurel:  #e6a948;
+  --civ-sylva:  #6fd08c;
+  --civ-bronze: #d97b4f;
+  --civ-abyss:  #7f8cf0;
+
+  /* 字体 */
+  --f-sans: "Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  --f-serif:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif;
+  --f-mono: "JetBrains Mono","SFMono-Regular","Consolas","Liberation Mono",monospace;
+
+  /* 尺度 */
+  --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:22px;
+  --top-h:64px;
+  --dock-w:288px;
+  --ctx-w:340px;
+  --bot-h:74px;
+
+  /* 动效 */
+  --ez:   cubic-bezier(.22,1,.36,1);
+  --ez-2: cubic-bezier(.34,1.56,.64,1);
+  --t-1:.18s; --t-2:.34s; --t-3:.6s;
+
+  /* 阴影 */
+  --sh-1:0 2px 10px rgba(0,0,0,.35);
+  --sh-2:0 10px 34px rgba(0,0,0,.5);
+  --sh-3:0 24px 70px rgba(0,0,0,.6);
+  --glow-gold:0 0 0 1px rgba(216,183,106,.35),0 6px 30px rgba(216,183,106,.12);
+  --glow-cyan:0 0 0 1px rgba(95,214,230,.35),0 6px 30px rgba(95,214,230,.12);
+}
+
+/* ---------- 复位 ---------- */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+html{-webkit-text-size-adjust:100%}
+body{
+  font-family:var(--f-sans);
+  font-size:14px;line-height:1.6;
+  color:var(--tx-0);
+  background:var(--bg-0);
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  font-feature-settings:"tnum" 1,"cv03" 1;
+}
+img,svg,canvas,video{display:block;max-width:100%}
+button,input,select,textarea{font:inherit;color:inherit;background:none;border:0}
+button{cursor:pointer}
+a{color:var(--cyan);text-decoration:none}
+ul,ol{list-style:none}
+[hidden]{display:none!important}
+::selection{background:rgba(216,183,106,.32);color:#fff}
+
+/* 自定义滚动条 */
+*{scrollbar-width:thin;scrollbar-color:rgba(216,183,106,.35) transparent}
+*::-webkit-scrollbar{width:9px;height:9px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{
+  background:linear-gradient(180deg,rgba(216,183,106,.4),rgba(216,183,106,.18));
+  border-radius:99px;border:2px solid transparent;background-clip:padding-box;
+}
+*::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,rgba(216,183,106,.7),rgba(216,183,106,.3));background-clip:padding-box}
+
+/* 焦点可达性 */
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px;border-radius:4px}
+
+/* ---------- 背景氛围（星云/网格/颗粒/暗角） ---------- */
+#nebula{
+  position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:
+    radial-gradient(1200px 800px at 78% -10%, rgba(95,90,220,.16), transparent 60%),
+    radial-gradient(1000px 700px at 8% 112%, rgba(24,120,150,.14), transparent 60%),
+    radial-gradient(700px 500px at 50% 50%, rgba(120,80,180,.05), transparent 70%),
+    var(--bg-0);
+}
+#nebula::before{ /* 细网格 */
+  content:"";position:absolute;inset:0;
+  background-image:
+    linear-gradient(rgba(120,150,210,.05) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(120,150,210,.05) 1px,transparent 1px);
+  background-size:44px 44px;
+  mask-image:radial-gradient(ellipse at center,#000 30%,transparent 78%);
+  opacity:.5;
+}
+#nebula::after{ /* 暗角 */
+  content:"";position:absolute;inset:0;
+  background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.5) 100%);
+}
+#grain{ /* 胶片颗粒 */
+  position:fixed;inset:-50%;z-index:60;pointer-events:none;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)'/%3E%3C/svg%3E");
+  animation:grain 7s steps(9) infinite;
+}
+@keyframes grain{
+  0%,100%{transform:translate(0,0)}12%{transform:translate(-2%,1%)}25%{transform:translate(1%,-2%)}
+  37%{transform:translate(-1%,2%)}50%{transform:translate(2%,1%)}62%{transform:translate(-2%,-1%)}
+  75%{transform:translate(1%,2%)}87%{transform:translate(2%,-2%)}
+}
+
+/* ---------- 通用工具 ---------- */
+.glass{
+  background:var(--panel);
+  border:1px solid var(--line);
+  backdrop-filter:blur(18px) saturate(150%);
+  -webkit-backdrop-filter:blur(18px) saturate(150%);
+  box-shadow:var(--sh-2);
+}
+.glass-2{background:var(--panel-2)}
+.notch{ /* 招牌切角 */
+  clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px);
+}
+.mono{font-family:var(--f-mono);font-variant-numeric:tabular-nums}
+.serif{font-family:var(--f-serif)}
+.tk{letter-spacing:.16em}      /* CJK 拉距标签 */
+.tk-2{letter-spacing:.26em}
+.tx0{color:var(--tx-0)}.tx1{color:var(--tx-1)}.tx2{color:var(--tx-2)}.tx3{color:var(--tx-3)}
+.gold{color:var(--gold)}.cyan{color:var(--cyan)}.violet{color:var(--violet)}
+.green{color:var(--green)}.red{color:var(--red)}.orange{color:var(--orange)}
+.dim{opacity:.66}
+.up{transform:translateZ(0)}
+.hidden{display:none!important}
+
+/* 角标刻线（文明卡托） */
+.cartouche{position:relative}
+.cartouche::before,.cartouche::after{
+  content:"";position:absolute;width:14px;height:14px;pointer-events:none;
+  border-color:var(--gold);border-style:solid;opacity:.75;
+}
+.cartouche::before{top:-1px;left:-1px;border-width:1.5px 0 0 1.5px}
+.cartouche::after{bottom:-1px;right:-1px;border-width:0 1.5px 1.5px 0}
+
+/* ---------- 动效库 ---------- */
+@keyframes fadeRise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes popIn{0%{opacity:0;transform:scale(.86)}100%{opacity:1;transform:scale(1)}}
+@keyframes popSpring{0%{opacity:0;transform:scale(.82) translateY(10px)}70%{transform:scale(1.02)}100%{opacity:1;transform:scale(1)}}
+@keyframes slideL{from{opacity:0;transform:translateX(-18px)}to{opacity:1;transform:none}}
+@keyframes slideR{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:none}}
+@keyframes slideUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes spinRev{to{transform:rotate(-360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes pulseRing{0%{transform:scale(.7);opacity:.9}80%,100%{transform:scale(1.9);opacity:0}}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes floatY{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+@keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(400%)}}
+@keyframes breathe{0%,100%{box-shadow:0 0 0 1px rgba(95,214,230,.2),0 0 24px rgba(95,214,230,.06)}50%{box-shadow:0 0 0 1px rgba(95,214,230,.45),0 0 44px rgba(95,214,230,.16)}}
+
+.anim-rise{animation:fadeRise .5s var(--ez) both}
+.anim-pop{animation:popSpring .45s var(--ez-2) both}
+.stagger>*{animation:fadeRise .5s var(--ez) both}
+.stagger>*:nth-child(1){animation-delay:.03s}.stagger>*:nth-child(2){animation-delay:.08s}
+.stagger>*:nth-child(3){animation-delay:.13s}.stagger>*:nth-child(4){animation-delay:.18s}
+.stagger>*:nth-child(5){animation-delay:.23s}.stagger>*:nth-child(6){animation-delay:.28s}
+.stagger>*:nth-child(7){animation-delay:.33s}.stagger>*:nth-child(8){animation-delay:.38s}
+.stagger>*:nth-child(9){animation-delay:.43s}.stagger>*:nth-child(10){animation-delay:.48s}
+
+/* 微光扫过 */
+.sheen{position:relative;overflow:hidden}
+.sheen::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(105deg,transparent 40%,rgba(255,255,255,.09) 50%,transparent 60%);
+  background-size:200% 100%;transform:translateX(-120%);transition:transform .8s var(--ez);
+}
+.sheen:hover::after{transform:translateX(120%)}
+
+/* 尊重减弱动效 */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+}

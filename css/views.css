@@ -1,0 +1,96 @@
+/* ============================================================
+   创世引擎 · views.css — 地图 HUD / 投影标签 / 上下文面板 / 视图专属
+   ============================================================ */
+
+/* ============ 3D 投影标签 ============ */
+#vignette{position:fixed;inset:0;z-index:3;pointer-events:none;
+  background:radial-gradient(ellipse at center,transparent 52%,rgba(2,4,9,.55) 100%)}
+#vignette::before{content:"";position:absolute;inset:0;
+  background-image:linear-gradient(rgba(120,150,210,.04) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(120,150,210,.04) 1px,transparent 1px);
+  background-size:44px 44px;opacity:.4;
+  mask-image:radial-gradient(ellipse at center,#000 20%,transparent 75%)}
+.map-label{
+  position:absolute;top:0;left:0;transform:translate(-50%,-50%);
+  pointer-events:none;white-space:nowrap;will-change:transform,opacity;
+  transition:opacity .2s var(--ez);
+}
+.map-label .ml-inner{display:flex;flex-direction:column;align-items:center;gap:3px;transform:translateY(-14px)}
+.map-label .ml-name{
+  font-size:11px;font-weight:600;color:var(--tx-0);letter-spacing:.04em;
+  padding:3px 9px;border-radius:7px;background:rgba(8,12,22,.72);border:1px solid var(--line-soft);
+  backdrop-filter:blur(6px);text-shadow:0 1px 4px rgba(0,0,0,.6);
+}
+.map-label .ml-tick{width:1px;height:11px;background:linear-gradient(180deg,var(--line-2),transparent)}
+.map-label .ml-dot{width:6px;height:6px;border-radius:99px;background:var(--ml-c,var(--gold));
+  box-shadow:0 0 8px var(--ml-c,var(--gold));border:1px solid rgba(255,255,255,.5)}
+.map-label.capital .ml-name{border-color:color-mix(in srgb,var(--ml-c,var(--gold)) 50%,transparent);
+  color:var(--ml-c,var(--gold));font-weight:700}
+.map-label.planet .ml-name{font-family:var(--f-serif);font-size:12px;font-weight:700}
+.map-label.dimmed{opacity:.28}
+.map-label .ml-sub{font-size:9px;color:var(--tx-2);letter-spacing:.05em;padding:1px 6px;border-radius:5px;
+  background:rgba(8,12,22,.6)}
+.map-label.clickable{pointer-events:auto;cursor:pointer}
+.map-label.clickable:hover .ml-name{border-color:var(--gold);color:var(--gold)}
+
+/* 轨道站脉冲标记 */
+.ml-pulse{position:relative;width:10px;height:10px}
+.ml-pulse::before{content:"";position:absolute;inset:0;border-radius:99px;background:var(--ml-c,var(--cyan))}
+.ml-pulse::after{content:"";position:absolute;inset:-3px;border-radius:99px;border:1px solid var(--ml-c,var(--cyan));
+  animation:pulseRing 2s var(--ez) infinite}
+
+/* ============ 上下文面板内容 ============ */
+.ctx-head{padding:16px 16px 13px;border-bottom:1px solid var(--line-soft);position:relative;overflow:hidden}
+.ctx-head::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--ctx-c,var(--gold)),transparent)}
+.ctx-kicker{display:flex;align-items:center;gap:7px;font-size:10px;color:var(--tx-2);letter-spacing:.12em;margin-bottom:7px}
+.ctx-kicker svg{width:12px;height:12px;color:var(--ctx-c,var(--gold))}
+.ctx-title{font-size:18px;font-weight:900;color:var(--tx-0);font-family:var(--f-serif);letter-spacing:.02em;line-height:1.25}
+.ctx-sub{font-size:11.5px;color:var(--tx-2);margin-top:4px}
+.ctx-close{position:absolute;top:12px;right:12px;width:28px;height:28px;border-radius:8px;display:grid;
+  place-items:center;color:var(--tx-3);background:rgba(255,255,255,.04);transition:all var(--t-1)}
+.ctx-close:hover{color:var(--tx-0);background:rgba(229,107,107,.16)}
+.ctx-body{padding:14px 16px 16px;display:flex;flex-direction:column;gap:0}
+.ctx-actions{display:flex;gap:8px;padding:0 16px 16px}
+.ctx-actions .btn{flex:1;justify-content:center}
+
+/* 上下文迷你统计 */
+.ctx-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
+.ctx-stat{background:rgba(255,255,255,.03);border:1px solid var(--line-soft);border-radius:10px;padding:9px;text-align:center}
+.ctx-stat .cs-num{font-family:var(--f-mono);font-size:16px;font-weight:700;color:var(--tx-0)}
+.ctx-stat .cs-label{font-size:9.5px;color:var(--tx-2);margin-top:2px;letter-spacing:.03em}
+
+/* 文明色带 */
+.civ-color-strip{display:flex;height:5px;border-radius:99px;overflow:hidden;margin:10px 0}
+.civ-color-strip i{height:100%}
+
+/* ============ 星球视图专属 ============ */
+#planet-legend{position:fixed;left:calc(var(--dock-w) + 30px);bottom:calc(var(--bot-h) + 12px);z-index:14;
+  display:flex;gap:6px;flex-wrap:wrap;max-width:400px}
+.leg-chip{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:10px;
+  background:rgba(10,15,26,.7);border:1px solid var(--line-soft);color:var(--tx-1);backdrop-filter:blur(8px)}
+.leg-chip .lc-dot{width:8px;height:8px;border-radius:99px;box-shadow:0 0 6px currentColor}
+
+/* ============ 宇宙视图专属 ============ */
+#universe-scale{position:fixed;right:calc(var(--ctx-w) + 30px);bottom:calc(var(--bot-h) + 12px);z-index:14;
+  padding:8px 14px;border-radius:10px;font-size:10.5px;color:var(--tx-2)}
+#universe-scale .mono{color:var(--cyan)}
+
+/* ============ 黑洞视图专属 ============ */
+#bh-hud{position:fixed;left:50%;bottom:calc(var(--bot-h) + 14px);transform:translateX(-50%);z-index:14;
+  display:flex;gap:18px;align-items:center;padding:10px 20px;pointer-events:none}
+.bh-stat{display:flex;flex-direction:column;align-items:center;gap:2px}
+.bh-stat .bhs-num{font-family:var(--f-mono);font-size:15px;font-weight:700;color:var(--cyan)}
+.bh-stat .bhs-label{font-size:9px;color:var(--tx-3);letter-spacing:.1em}
+#bh-title{position:fixed;left:50%;top:calc(var(--top-h) + 20px);transform:translateX(-50%);z-index:14;
+  text-align:center;pointer-events:none}
+#bh-title .bht-name{font-family:var(--f-serif);font-size:24px;font-weight:900;letter-spacing:.2em;color:var(--tx-0);
+  text-shadow:0 0 30px rgba(95,214,230,.4)}
+#bh-title .bht-sub{font-size:10px;color:var(--tx-2);letter-spacing:.3em;margin-top:5px}
+
+/* 视图切换淡入 */
+.view-fade{animation:fadeIn .5s var(--ez)}
+
+/* 载入 spinner */
+.spinner{width:20px;height:20px;border-radius:99px;border:2px solid rgba(255,255,255,.15);
+  border-top-color:var(--cyan);animation:spin .8s linear infinite}

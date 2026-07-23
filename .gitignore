@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Claude Code workspace data
+.claude/
+
+# Local test artifacts
+playwright-report/
+test-results/
+
+# Local conversation exports
+对话记录*.md
