@@ -297,10 +297,18 @@ GE.views.universe = (function () {
   }
 
   /* ============ 交互 ============ */
+  // 多视图共用同一 canvas；仅当前激活视图响应
+  function isActiveView() {
+    return GE.app && GE.app.state && GE.app.state.view === 'universe';
+  }
   function bindPointer() {
     const dom = env.dom;
-    dom.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY, t: 0 }; });
+    dom.addEventListener('pointerdown', (e) => {
+      if (!isActiveView()) return;
+      downPos = { x: e.clientX, y: e.clientY, t: 0 };
+    });
     dom.addEventListener('pointerup', (e) => {
+      if (!isActiveView()) { downPos = null; return; }
       if (!downPos) return;
       const moved = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
       downPos = null;
@@ -308,6 +316,7 @@ GE.views.universe = (function () {
       handleClick(e);
     });
     dom.addEventListener('dblclick', (e) => {
+      if (!isActiveView()) return;
       const b = pickBody(e);
       if (b && b.home) GE.app.switchView('planet');
     });
@@ -397,7 +406,7 @@ GE.views.universe = (function () {
   view.render = function (renderer) { renderer.render(view.scene, view.camera); };
   view.resize = function (w, h) { view.camera.aspect = w / h; view.camera.updateProjectionMatrix(); };
   view.activate = function () { view._tagMeshes(); };
-  view.deactivate = function () { view._focus = null; };
+  view.deactivate = function () { downPos = null; view._focus = null; };
   view.dispose = function () {};
 
   return view;

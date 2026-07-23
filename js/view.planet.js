@@ -73,7 +73,7 @@ GE.views.planet = (function () {
     view.scene.add(starfield);
   }
 
-  /* ============ 星球本体（海洋 + 昼夜 + 冰盖 + 高光） ============ */
+  /* ============ 星球本体（大陆 + 海洋 + 昼夜 + 冰盖 + 高光） ============ */
   function buildGlobe() {
     const geo = new THREE.SphereGeometry(R, 96, 96);
     const mat = new THREE.ShaderMaterial({
@@ -87,19 +87,41 @@ GE.views.planet = (function () {
         ${GE.glsl.noise}
         void main(){
           vec3 N=normalize(vN); vec3 V=normalize(cameraPosition-vW);
-          vec3 base=mix(vec3(0.05,0.13,0.23),vec3(0.03,0.09,0.17),fbm3(vW*0.03,4)); // 深海渐变
+          vec3 p=normalize(vW);
+          // 程序化大陆：低频造陆 + 高频细节，与战略地块分层叠加时作星球贴图底色
+          float cont=fbm3(p*2.1+vec3(5.0,0.0,0.0),4);
+          float detail=fbm3(p*6.5+vec3(0.0,9.0,0.0),4);
+          float m=cont*0.72+detail*0.28;
+          float sea=0.52;
+          float landMask=smoothstep(sea-0.04,sea+0.03,m);
+          float elev=clamp((m-sea)/max(1.0-sea,0.001),0.0,1.0);
+          float absLat=abs(p.y);
+          float moist=fbm3(p*4.0+vec3(20.0,0.0,0.0),3);
+          // 海洋底色
+          vec3 ocean=mix(vec3(0.03,0.09,0.17),vec3(0.06,0.18,0.30),fbm3(vW*0.03,4));
+          // 陆地：沙漠 / 平原 / 森林 / 山地
+          vec3 desert=vec3(0.72,0.62,0.38);
+          vec3 plains=vec3(0.38,0.52,0.28);
+          vec3 forest=vec3(0.18,0.38,0.22);
+          vec3 hills=vec3(0.42,0.42,0.30);
+          vec3 mountain=vec3(0.48,0.50,0.54);
+          float arid=step(absLat,0.28)*step(moist,0.42);
+          vec3 land=mix(plains,forest,smoothstep(0.45,0.62,moist));
+          land=mix(land,desert,arid);
+          land=mix(land,hills,smoothstep(0.45,0.60,elev));
+          land=mix(land,mountain,smoothstep(0.62,0.82,elev));
+          // 极地冰盖
+          float ice=smoothstep(0.72,0.88,absLat);
+          land=mix(land,vec3(0.86,0.90,0.94),ice);
+          ocean=mix(ocean,vec3(0.70,0.78,0.88),smoothstep(0.82,0.95,absLat)*0.55);
+          vec3 base=mix(ocean,land,landMask);
           float day=smoothstep(-0.08,0.25,dot(N,normalize(uSun)));
-          // 极地冰盖微光
-          float ice=smoothstep(0.82,0.95,abs(normalize(vW).y));
-          base=mix(base,vec3(0.75,0.82,0.9),ice*0.5);
-          // 海洋镜面高光
+          // 海洋镜面高光（陆地弱化）
           vec3 H=normalize(normalize(uSun)+V);
-          float spec=pow(max(dot(N,H),0.0),90.0)*0.5*day;
-          // 昼夜
-          vec3 col=base*(0.12+1.05*day)+vec3(1.0,0.95,0.8)*spec;
-          // 菲涅尔边缘
+          float spec=pow(max(dot(N,H),0.0),90.0)*0.55*day*(1.0-landMask*0.85);
+          vec3 col=base*(0.14+1.0*day)+vec3(1.0,0.95,0.8)*spec;
           float fr=pow(1.0-max(dot(N,V),0.0),3.0);
-          col+=vec3(0.2,0.5,0.7)*fr*0.4;
+          col+=vec3(0.2,0.5,0.7)*fr*0.35;
           gl_FragColor=vec4(col,1.0);
         }`
     });
@@ -112,63 +134,158 @@ GE.views.planet = (function () {
   function buildStrategicMap() {
     GE.worldState.build();
     const tiles = GE.worldState.tiles;
-    const terrainPositions = [], terrainColors = [], regionPositions = [], regionColors = [], ownerPositions = [], ownerColors = [];
-    const regionEdges = [], politicalEdges = [], assets = [];
+    // 战略地块全部不铺实心地形色：区域/归属透明染色 + 边界线，星球贴图透出。
+    const regionPositions = [], regionColors = [];
+    const ownerPositions = [], ownerColors = [];
+    const regionEdges = [], politicalEdges = [];
+    const buildingMarks = []; // { n:[x,y,z], elev }
     const seenRegionEdges = new Set(), seenPoliticalEdges = new Set();
     const civColors = Object.fromEntries(GE.data.civs.map(c => [c.id, new THREE.Color(c.color)]));
 
-    function addTriangle(target, colors, a, b, c, color, scale) {
-      [a, b, c].forEach(v => { target.push(v[0] * scale, v[1] * scale, v[2] * scale); colors.push(color.r, color.g, color.b); });
+    // 战略层贴在同一球面高度，不体现地形落差
+    function elevScale() { return 1.004; }
+    function addTriangle(pos, cols, a, b, c, color, scale) {
+      [a, b, c].forEach(v => {
+        pos.push(v[0] * scale, v[1] * scale, v[2] * scale);
+        cols.push(color.r, color.g, color.b);
+      });
     }
-    function edgeKey(a, b) { const aa = a.map(v => v.toFixed(5)).join(','), bb = b.map(v => v.toFixed(5)).join(','); return aa < bb ? aa + '|' + bb : bb + '|' + aa; }
-    function addEdge(target, a, b, scale) { target.push(a[0] * scale, a[1] * scale, a[2] * scale, b[0] * scale, b[1] * scale, b[2] * scale); }
+    function edgeKey(a, b) {
+      const aa = a.map(v => v.toFixed(5)).join(','), bb = b.map(v => v.toFixed(5)).join(',');
+      return aa < bb ? aa + '|' + bb : bb + '|' + aa;
+    }
+    function addEdge(target, a, b, scale) {
+      target.push(a[0] * scale, a[1] * scale, a[2] * scale, b[0] * scale, b[1] * scale, b[2] * scale);
+    }
+    // polygon 边序与 neighbors 数组无对应关系，按边中点找共享邻接块
+    function neighborAcross(tile, a, b) {
+      const mx = a[0] + b[0], my = a[1] + b[1], mz = a[2] + b[2];
+      const inv = 1 / (Math.hypot(mx, my, mz) || 1);
+      const mid = [mx * inv, my * inv, mz * inv];
+      let best = null, score = -Infinity;
+      for (let i = 0; i < tile.neighbors.length; i++) {
+        const n = GE.worldState.getTile(tile.neighbors[i]);
+        if (!n) continue;
+        const s = n.center[0] * mid[0] + n.center[1] * mid[1] + n.center[2] * mid[2];
+        if (s > score) { score = s; best = n; }
+      }
+      return best;
+    }
 
     faceTileIds = [];
     tiles.forEach(tile => {
-      const terrain = GE.data.strategicMap.terrainCatalog[tile.terrain];
-      const terrainColor = new THREE.Color(terrain.color);
       const region = GE.worldState.getRegion(tile.regionId);
       const regionColor = new THREE.Color(region.color);
       const ownerColor = tile.ownerCivId ? civColors[tile.ownerCivId] : null;
-      const surface = R * (tile.terrain === 'mountain' ? 1.026 : tile.terrain === 'hills' ? 1.014 : 1.006);
-      for (let i = 1; i < tile.polygon.length - 1; i++) {
-        addTriangle(terrainPositions, terrainColors, tile.center, tile.polygon[i], tile.polygon[i + 1], terrainColor, surface);
-        faceTileIds.push(tile.id);
-        addTriangle(regionPositions, regionColors, tile.center, tile.polygon[i], tile.polygon[i + 1], regionColor, surface * 1.001);
-        if (ownerColor) addTriangle(ownerPositions, ownerColors, tile.center, tile.polygon[i], tile.polygon[i + 1], ownerColor, surface * 1.002);
+      const surface = R * elevScale(tile.terrain);
+
+      // 全环扇形三角剖分，避免漏掉 (center, p[n-1], p[0]) 等扇区造成菱形空缺
+      const poly = tile.polygon;
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i], b = poly[(i + 1) % poly.length];
+        addTriangle(regionPositions, regionColors, tile.center, a, b, regionColor, surface * 1.001);
+        if (ownerColor) {
+          addTriangle(ownerPositions, ownerColors, tile.center, a, b, ownerColor, surface * 1.003);
+        }
       }
+
       for (let i = 0; i < tile.polygon.length; i++) {
         const a = tile.polygon[i], b = tile.polygon[(i + 1) % tile.polygon.length];
         const key = edgeKey(a, b);
-        const neighbor = GE.worldState.getTile(tile.neighbors[i] || '');
-        if (neighbor && neighbor.regionId !== tile.regionId && !seenRegionEdges.has(key)) { seenRegionEdges.add(key); addEdge(regionEdges, a, b, surface * 1.007); }
-        if (neighbor && neighbor.ownerCivId !== tile.ownerCivId && (tile.ownerCivId || neighbor.ownerCivId) && !seenPoliticalEdges.has(key)) { seenPoliticalEdges.add(key); addEdge(politicalEdges, a, b, surface * 1.009); }
+        const neighbor = neighborAcross(tile, a, b);
+        if (neighbor && neighbor.regionId !== tile.regionId && !seenRegionEdges.has(key)) {
+          seenRegionEdges.add(key);
+          addEdge(regionEdges, a, b, surface * 1.008);
+        }
+        if (neighbor && neighbor.ownerCivId !== tile.ownerCivId && (tile.ownerCivId || neighbor.ownerCivId) && !seenPoliticalEdges.has(key)) {
+          seenPoliticalEdges.add(key);
+          addEdge(politicalEdges, a, b, surface * 1.010);
+        }
       }
-      if (tile.buildings.length || tile.resources.length) assets.push(tile.center[0] * surface * 1.018, tile.center[1] * surface * 1.018, tile.center[2] * surface * 1.018);
+
+      // 仅标建筑（立柱）；资源不在地图上铺图标，避免在染色层上戳出菱形空缺
+      if (tile.buildings.length) {
+        buildingMarks.push({ n: tile.center, elev: surface * 1.016 });
+      }
     });
 
-    function makeMesh(positions, colors, opacity) {
+    function makeOverlayMesh(positions, colors, opacity) {
       const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-      geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-      return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors:true, transparent:opacity < 1, opacity, side:THREE.DoubleSide, depthWrite:opacity >= 1 }));
+      if (positions.length) {
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+      }
+      return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity,
+        side: THREE.FrontSide,
+        depthWrite: false,
+        blending: THREE.NormalBlending
+      }));
     }
-    terrainMesh = makeMesh(terrainPositions, terrainColors, .98);
-    regionMesh = makeMesh(regionPositions, regionColors, .18);
-    ownershipMesh = makeMesh(ownerPositions, ownerColors, .20);
-    const lineGeo = new THREE.BufferGeometry(); lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(regionEdges, 3));
-    regionBorders = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color:0xe9d8a6, transparent:true, opacity:.58 }));
-    const politicalGeo = new THREE.BufferGeometry(); politicalGeo.setAttribute('position', new THREE.Float32BufferAttribute(politicalEdges, 3));
-    politicalBorders = new THREE.LineSegments(politicalGeo, new THREE.LineBasicMaterial({ color:0xffffff, transparent:true, opacity:.72 }));
-    const assetGeo = new THREE.BufferGeometry(); assetGeo.setAttribute('position', new THREE.Float32BufferAttribute(assets, 3));
-    assetPoints = new THREE.Points(assetGeo, new THREE.PointsMaterial({ color:0xffd89b, size:2.1, sizeAttenuation:true, transparent:true, opacity:.86 }));
+    function makeLines(positions, color, opacity) {
+      const geo = new THREE.BufferGeometry();
+      if (positions.length) geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+        color, transparent: true, opacity, depthWrite: false
+      }));
+    }
+
+    // 建筑：径向小立柱 + 顶灯（InstancedMesh）
+    function buildBuildingLayer(marks) {
+      const group = new THREE.Group();
+      group.name = 'buildingMarks';
+      if (!marks.length) return group;
+      const pillarGeo = new THREE.CylinderGeometry(0.35, 0.55, 2.4, 6);
+      const pillarMat = new THREE.MeshBasicMaterial({ color: 0xffd089, transparent: true, opacity: 0.92 });
+      const capGeo = new THREE.SphereGeometry(0.55, 8, 8);
+      const capMat = new THREE.MeshBasicMaterial({ color: 0xfff0c8 });
+      const pillars = new THREE.InstancedMesh(pillarGeo, pillarMat, marks.length);
+      const caps = new THREE.InstancedMesh(capGeo, capMat, marks.length);
+      const dummy = new THREE.Object3D();
+      const yUp = new THREE.Vector3(0, 1, 0);
+      const n = new THREE.Vector3();
+      marks.forEach((m, i) => {
+        n.set(m.n[0], m.n[1], m.n[2]).normalize();
+        dummy.position.copy(n).multiplyScalar(m.elev + 1.1);
+        dummy.quaternion.setFromUnitVectors(yUp, n);
+        dummy.scale.set(1, 1, 1);
+        dummy.updateMatrix();
+        pillars.setMatrixAt(i, dummy.matrix);
+        dummy.position.copy(n).multiplyScalar(m.elev + 2.5);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        caps.setMatrixAt(i, dummy.matrix);
+      });
+      pillars.instanceMatrix.needsUpdate = true;
+      caps.instanceMatrix.needsUpdate = true;
+      group.add(pillars, caps);
+      return group;
+    }
+
+    // 地形色块关闭，点选走 globe
+    terrainMesh = makeOverlayMesh([], [], 0);
+    terrainMesh.visible = false;
+    // 区域/归属染色：更透明，让星球贴图为主
+    regionMesh = makeOverlayMesh(regionPositions, regionColors, 0.16);
+    ownershipMesh = makeOverlayMesh(ownerPositions, ownerColors, 0.18);
+    regionBorders = makeLines(regionEdges, 0xe9d8a6, 0.48);
+    view._regionOnlyBorders = null;
+    politicalBorders = makeLines(politicalEdges, 0xffffff, 0.58);
+
+    // 资产层：仅建筑立柱（不再铺资源菱形，避免在染色面上戳洞）
+    assetPoints = new THREE.Group();
+    assetPoints.name = 'assets';
+    assetPoints.add(buildBuildingLayer(buildingMarks));
+
     terrainMesh.userData.faceTileIds = faceTileIds;
     view.scene.add(terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints);
 
     view._capitals = GE.data.civs.map(c => {
       const seed = GE.data.strategicMap.capitalSeeds[c.id];
       const tile = GE.worldGrid.nearestLatLon(seed.lat, seed.lon);
-      return { id:c.id, name:c.capital, civName:c.name, color:c.color, tileId:tile.id, pos:new THREE.Vector3(...tile.center).multiplyScalar(R * 1.05) };
+      return { id: c.id, name: c.capital, civName: c.name, color: c.color, tileId: tile.id, pos: new THREE.Vector3(...tile.center).multiplyScalar(R * 1.05) };
     });
   }
 
@@ -349,10 +466,18 @@ GE.views.planet = (function () {
   }
 
   /* ============ 指针交互 ============ */
+  // 多视图共用同一 canvas；仅当前激活视图响应，避免宇宙视图点出星球地块资源面板
+  function isActiveView() {
+    return GE.app && GE.app.state && GE.app.state.view === 'planet';
+  }
   function bindPointer() {
     const dom = env.dom;
-    dom.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY }; });
+    dom.addEventListener('pointerdown', (e) => {
+      if (!isActiveView()) return;
+      downPos = { x: e.clientX, y: e.clientY };
+    });
     dom.addEventListener('pointerup', (e) => {
+      if (!isActiveView()) { downPos = null; return; }
       if (!downPos) return;
       const moved = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y);
       downPos = null;
@@ -360,10 +485,11 @@ GE.views.planet = (function () {
       handleClick(e);
     });
     dom.addEventListener('pointermove', (e) => {
+      if (!isActiveView()) return;
       if (view.rig.isDragging()) { hideHover(); return; }
       handleHover(e);
     });
-    dom.addEventListener('pointerleave', hideHover);
+    dom.addEventListener('pointerleave', () => { if (isActiveView()) hideHover(); });
   }
 
   function setPointer(e) {
@@ -374,9 +500,12 @@ GE.views.planet = (function () {
   function pickHex(e) {
     setPointer(e);
     raycaster.setFromCamera(pointer, view.camera);
-    const hits = terrainMesh ? raycaster.intersectObject(terrainMesh, false) : [];
-    if (hits.length && hits[0].faceIndex != null) {
-      return GE.worldState.getTile(terrainMesh.userData.faceTileIds[hits[0].faceIndex]);
+    // 战略色块已透明：全部走 globe 命中 → 最近地块
+    const globeHits = globe ? raycaster.intersectObject(globe, false) : [];
+    if (globeHits.length) {
+      const p = globeHits[0].point;
+      const grid = GE.worldGrid.nearestToVector([p.x, p.y, p.z]);
+      return grid ? GE.worldState.getTile(grid.id) : null;
     }
     return null;
   }
@@ -520,7 +649,7 @@ GE.views.planet = (function () {
   view.render = function (renderer) { renderer.render(view.scene, view.camera); };
   view.resize = function (w, h) { view.camera.aspect = w / h; view.camera.updateProjectionMatrix(); };
   view.activate = function () { if (env) env.dom.classList.remove('dragging'); };
-  view.deactivate = function () { hideHover(); };
+  view.deactivate = function () { downPos = null; hideHover(); };
   view.focusTile = function (tileId) {
     const tile = GE.worldState.getTile(tileId); if (!tile) return;
     view.rig.flyTo({ radius: 190, target:new THREE.Vector3(...tile.center).multiplyScalar(R) }, 1.2);
