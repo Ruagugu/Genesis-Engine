@@ -12,6 +12,7 @@ import * as runStore from './run-store.mjs';
 import { deduce } from './deduce-engine.mjs';
 import { ensureSurfaceOnRun } from './surface-ensure.mjs';
 import * as llmSettings from './llm-settings.mjs';
+import * as llmLog from './llm-log.mjs';
 
 const port = process.env.PORT ? Number(process.env.PORT) : 8123;
 const mime = {
@@ -94,7 +95,8 @@ const WRITE_ALLOWED = new Set([
   'POST /api/v1/runs/:id/bodies/:bodyId/surface/ensure',
   'PUT /api/v1/llm-settings',
   'POST /api/v1/llm-settings',
-  'DELETE /api/v1/llm-settings'
+  'DELETE /api/v1/llm-settings',
+  'DELETE /api/v1/llm-logs'
 ]);
 
 async function handleApi(req, res, urlPath) {
@@ -134,6 +136,7 @@ async function handleApi(req, res, urlPath) {
         apiKeySet: !!llm.apiKeySet,
         baseUrlSet: !!llm.baseUrl
       },
+      llmLog: llmLog.list({ limit: 1 }).totals,
       runId: run.id,
       revision: run.revision,
       year: run.year
@@ -192,6 +195,28 @@ async function handleApi(req, res, urlPath) {
   if (urlPath === '/api/v1/llm-settings' && req.method === 'DELETE') {
     const saved = llmSettings.reset();
     json(res, 200, { ok: true, cleared: true, settings: llmSettings.getPublic({ maskKey: true }) });
+    return true;
+  }
+
+  // ---------- LLM 调用日志（推演 AI 次数与返回内容） ----------
+  if (urlPath === '/api/v1/llm-logs' && req.method === 'GET') {
+    let q = {};
+    try {
+      const u = new URL(req.url || '/', 'http://localhost');
+      q = Object.fromEntries(u.searchParams.entries());
+    } catch (_) { /* ignore */ }
+    const data = llmLog.list({
+      runId: q.runId || q.run || null,
+      round: q.round != null && q.round !== '' ? Number(q.round) : null,
+      purpose: q.purpose || null,
+      limit: q.limit != null ? Number(q.limit) : 50
+    });
+    json(res, 200, data);
+    return true;
+  }
+
+  if (urlPath === '/api/v1/llm-logs' && req.method === 'DELETE') {
+    json(res, 200, llmLog.clear());
     return true;
   }
 

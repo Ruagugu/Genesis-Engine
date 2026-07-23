@@ -680,10 +680,22 @@ GE.app = (function () {
       decisions: result.decisions || [],
       worldDelta: result.worldDelta || null,
       agentMode: (result.round && result.round.agentMode) || 'rules_only',
-      agentMeta: result.agentMeta || null
+      agentMeta: result.agentMeta || null,
+      // AI 调用日志（次数 + 返回内容）
+      llmLogs: Array.isArray(result.llmLogs) ? result.llmLogs : [],
+      llmTotals: result.llmTotals || null
     };
     GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
     GE.data.deduction.log.unshift(log);
+    // 全局累计 LLM 日志（最近 80 条）
+    GE.data.llmLogs = GE.data.llmLogs || [];
+    if (Array.isArray(result.llmLogs) && result.llmLogs.length) {
+      result.llmLogs.forEach(e => {
+        if (!GE.data.llmLogs.some(x => x.id === e.id)) GE.data.llmLogs.unshift(e);
+      });
+      if (GE.data.llmLogs.length > 80) GE.data.llmLogs.length = 80;
+    }
+    if (result.llmTotals) GE.data.llmTotals = result.llmTotals;
     if (result.decisions) {
       GE.data.deduction.pendingDecisions = result.decisions.map(d => ({
         civ: d.civId,
@@ -824,6 +836,7 @@ GE.app = (function () {
     let title = `第 ${state.deductionRound} 轮推演已收敛`;
     if (agentMeta && agentMeta.used && agentMeta.used !== 'rules_only') {
       title += ` · ${agentMeta.used}`;
+      if (agentMeta.llmCalls) title += ` · AI×${agentMeta.llmCalls}`;
     } else if (agentMeta && agentMeta.fallback) {
       title += ' · 规则回落';
     }

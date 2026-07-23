@@ -14,6 +14,7 @@ import {
 } from './procedural-universe.mjs';
 import { clone, touch } from './run-store.mjs';
 import { chat as llmChat, parseJsonLoose, llmConfigured } from './llm-provider.mjs';
+import * as llmLog from './llm-log.mjs';
 
 const LENS_KEYS = ['政治', '军事', '经济', '科技', '思潮', '个人'];
 
@@ -513,14 +514,15 @@ function resolveAgentMode(run, opts) {
  * hybrid/full：用一次批量 LLM 调用润色 / 改写规则决策；失败整批回落规则。
  * @returns {Promise<{ decisions: object[], lenses: object|null, meta: object }>}
  */
-async function enhanceWithLlm(run, decisions, opts, agentMode) {
+async function enhanceWithLlm(run, decisions, opts, agentMode, roundN) {
   const meta = {
     requested: agentMode,
     used: 'rules_only',
     llmCalls: 0,
     llmMs: 0,
     fallback: null,
-    error: null
+    error: null,
+    logIds: []
   };
   const llm = opts && opts.llm;
   if (!llmConfigured(llm)) {
@@ -594,6 +596,21 @@ async function enhanceWithLlm(run, decisions, opts, agentMode) {
   if (!result.ok) {
     meta.fallback = 'llm_error';
     meta.error = result.error || 'llm_failed';
+    const logEntry = llmLog.record({
+      runId: run.id,
+      round: roundN,
+      purpose: 'character_enhance',
+      model: llm.model,
+      baseHost: llmLog.hostFromBase(llm.baseUrl),
+      ok: false,
+      ms: result.ms,
+      error: meta.error,
+      systemPreview: system,
+      promptPreview: user,
+      content: '',
+      fallback: 'llm_error'
+    });
+    meta.logIds.push(logEntry.id);
     return { decisions, lenses: null, meta };
   }
 
@@ -601,6 +618,22 @@ async function enhanceWithLlm(run, decisions, opts, agentMode) {
   if (!parsed || !Array.isArray(parsed.decisions)) {
     meta.fallback = 'llm_parse_error';
     meta.error = 'invalid_json';
+    const logEntry = llmLog.record({
+      runId: run.id,
+      round: roundN,
+      purpose: 'character_enhance',
+      model: llm.model,
+      baseHost: llmLog.hostFromBase(llm.baseUrl),
+      ok: true,
+      ms: result.ms,
+      systemPreview: system,
+      promptPreview: user,
+      content: result.content,
+      usage: result.raw?.usage || null,
+      parseOk: false,
+      fallback: 'llm_parse_error'
+    });
+    meta.logIds.push(logEntry.id);
     return { decisions, lenses: null, meta };
   }
 
@@ -629,6 +662,23 @@ async function enhanceWithLlm(run, decisions, opts, agentMode) {
   if (applied === 0) {
     meta.fallback = 'llm_no_match';
     meta.error = 'no_character_matched';
+    const logEntry = llmLog.record({
+      runId: run.id,
+      round: roundN,
+      purpose: 'character_enhance',
+      model: llm.model,
+      baseHost: llmLog.hostFromBase(llm.baseUrl),
+      ok: true,
+      ms: result.ms,
+      systemPreview: system,
+      promptPreview: user,
+      content: result.content,
+      usage: result.raw?.usage || null,
+      parseOk: true,
+      applied: 0,
+      fallback: 'llm_no_match'
+    });
+    meta.logIds.push(logEntry.id);
     return { decisions, lenses: null, meta };
   }
 
@@ -644,13 +694,29 @@ async function enhanceWithLlm(run, decisions, opts, agentMode) {
 
   meta.used = agentMode;
   meta.applied = applied;
+  const logEntry = llmLog.record({
+    runId: run.id,
+    round: roundN,
+    purpose: 'character_enhance',
+    model: llm.model,
+    baseHost: llmLog.hostFromBase(llm.baseUrl),
+    ok: true,
+    ms: result.ms,
+    systemPreview: system,
+    promptPreview: user,
+    content: result.content,
+    usage: result.raw?.usage || null,
+    parseOk: true,
+    applied
+  });
+  meta.logIds.push(logEntry.id);
   return { decisions, lenses, meta };
 }
 
 /**
  * 可选：为新发现天体润色中文名 / 描述（失败静默忽略）
  */
-async function detailFillBodies(run, worldDelta, opts, agentMode, llmMeta) {
+async function detailFillBodies(run, worldDelta, opts, agentMode, llmMeta, roundN) {
   if (agentMode === 'rules_only') return;
   if (!llmConfigured(opts && opts.llm)) return;
   const candidates = (worldDelta.newBodies || []).filter(b =>
@@ -665,17 +731,16 @@ async function detailFillBodies(run, worldDelta, opts, agentMode, llmMeta) {
     name: b.name,
     desc: b.desc
   }));
+  const system = [
+    '你为科幻推演润色新发现天体的中文名与一句描述。',
+    '输出 JSON：{"items":[{"id":"","name":"两字或三字中文名","desc":"一句中文"}]}',
+    '名须典雅、不与常见地名雷同；不要解释。'
+  ].join('\n');
+  const user = JSON.stringify({ bodies: payload });
   const result = await llmChat(
     [
-      {
-        role: 'system',
-        content: [
-          '你为科幻推演润色新发现天体的中文名与一句描述。',
-          '输出 JSON：{"items":[{"id":"","name":"两字或三字中文名","desc":"一句中文"}]}',
-          '名须典雅、不与常见地名雷同；不要解释。'
-        ].join('\n')
-      },
-      { role: 'user', content: JSON.stringify({ bodies: payload }) }
+      { role: 'system', content: system },
+      { role: 'user', content: user }
     ],
     {
       baseUrl: opts.llm.baseUrl,
@@ -687,25 +752,62 @@ async function detailFillBodies(run, worldDelta, opts, agentMode, llmMeta) {
   );
   llmMeta.llmCalls = (llmMeta.llmCalls || 0) + 1;
   llmMeta.llmMs = (llmMeta.llmMs || 0) + (result.ms || 0);
-  if (!result.ok) return;
-  const parsed = parseJsonLoose(result.content);
-  if (!parsed || !Array.isArray(parsed.items)) return;
+  llmMeta.logIds = llmMeta.logIds || [];
 
-  const runBodies = run.discovered.bodies || [];
-  parsed.items.forEach(item => {
-    if (!item || !item.id) return;
-    const name = String(item.name || '').trim().slice(0, 12);
-    const desc = String(item.desc || '').trim().slice(0, 160);
-    if (!name && !desc) return;
-    const patch = (body) => {
-      if (!body || body.id !== item.id) return;
-      if (name) body.name = name;
-      if (desc) body.desc = desc;
-    };
-    worldDelta.newBodies.forEach(patch);
-    runBodies.forEach(patch);
+  if (!result.ok) {
+    const logEntry = llmLog.record({
+      runId: run.id,
+      round: roundN,
+      purpose: 'detail_fill',
+      model: opts.llm.model,
+      baseHost: llmLog.hostFromBase(opts.llm.baseUrl),
+      ok: false,
+      ms: result.ms,
+      error: result.error,
+      systemPreview: system,
+      promptPreview: user,
+      content: ''
+    });
+    llmMeta.logIds.push(logEntry.id);
+    return;
+  }
+
+  const parsed = parseJsonLoose(result.content);
+  const parseOk = !!(parsed && Array.isArray(parsed.items));
+  if (parseOk) {
+    const runBodies = run.discovered.bodies || [];
+    parsed.items.forEach(item => {
+      if (!item || !item.id) return;
+      const name = String(item.name || '').trim().slice(0, 12);
+      const desc = String(item.desc || '').trim().slice(0, 160);
+      if (!name && !desc) return;
+      const patch = (body) => {
+        if (!body || body.id !== item.id) return;
+        if (name) body.name = name;
+        if (desc) body.desc = desc;
+      };
+      worldDelta.newBodies.forEach(patch);
+      runBodies.forEach(patch);
+    });
+    llmMeta.detailFill = true;
+  }
+
+  const logEntry = llmLog.record({
+    runId: run.id,
+    round: roundN,
+    purpose: 'detail_fill',
+    model: opts.llm.model,
+    baseHost: llmLog.hostFromBase(opts.llm.baseUrl),
+    ok: true,
+    ms: result.ms,
+    systemPreview: system,
+    promptPreview: user,
+    content: result.content,
+    usage: result.raw?.usage || null,
+    parseOk,
+    applied: parseOk ? (parsed.items || []).length : 0
   });
-  llmMeta.detailFill = true;
+  llmMeta.logIds.push(logEntry.id);
 }
 
 /**
@@ -740,14 +842,16 @@ async function deduce(run, opts) {
     llmCalls: 0,
     llmMs: 0,
     fallback: agentMode === 'rules_only' ? null : 'skipped',
-    error: null
+    error: null,
+    logIds: []
   };
   let llmLenses = null;
   if (agentMode !== 'rules_only') {
-    const enhanced = await enhanceWithLlm(run, decisions, opts, agentMode);
+    const enhanced = await enhanceWithLlm(run, decisions, opts, agentMode, roundN);
     decisions = enhanced.decisions;
     llmLenses = enhanced.lenses;
     llmMeta = enhanced.meta;
+    llmMeta.logIds = llmMeta.logIds || [];
     // LLM 可能改掉 kind，再跑一遍软保底
     applySoftGuarantees(run, decisions, roundN, opts);
   }
@@ -766,11 +870,14 @@ async function deduce(run, opts) {
   // 4b) DetailFiller（仅 hybrid/full，失败静默）
   if (agentMode !== 'rules_only' && llmMeta.used !== 'rules_only') {
     try {
-      await detailFillBodies(run, worldDelta, opts, agentMode, llmMeta);
+      await detailFillBodies(run, worldDelta, opts, agentMode, llmMeta, roundN);
     } catch (err) {
       llmMeta.detailFillError = String(err && err.message || err);
     }
   }
+
+  // 本轮 AI 调用明细（供前端日志查看）
+  const llmLogs = llmLog.forRound(run.id, roundN);
 
   // 5) Resolver
   const { yearDelta, patches } = applyResolver(run, decisions, lenses, opts.edict);
@@ -815,7 +922,8 @@ async function deduce(run, opts) {
       calls: llmMeta.llmCalls || 0,
       ms: llmMeta.llmMs || 0,
       fallback: llmMeta.fallback || null,
-      error: llmMeta.error || null
+      error: llmMeta.error || null,
+      logIds: llmMeta.logIds || []
     },
     edict: opts.edict || null
   };
@@ -845,7 +953,10 @@ async function deduce(run, opts) {
     worldDelta,
     chronicle: [chronicleEntry],
     yearDelta,
-    agentMeta: llmMeta
+    agentMeta: llmMeta,
+    // 本轮 AI 调用次数与返回内容（日志查看）
+    llmLogs: llmLogs || [],
+    llmTotals: llmLog.list({ limit: 1 }).totals
   };
 }
 

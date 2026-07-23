@@ -1001,6 +1001,7 @@ GE.panels = (function () {
     const d = D().deduction;
     const lensIcons = { 政治: 'balance', 军事: 'sword', 经济: 'coin', 科技: 'flask', 思潮: 'compass', 个人: 'user' };
     const latest = d.log[0];
+    const llmTotals = (GE.data && GE.data.llmTotals) || null;
     root.innerHTML = `
       <div class="deduce-grid">
         <!-- 流水线 -->
@@ -1013,10 +1014,12 @@ GE.panels = (function () {
                 ${idx < 3 ? '<div class="pipe-conn"></div>' : ''}
               </div>`).join('')}
           </div>
-          <div style="display:flex;gap:10px;justify-content:center;padding-bottom:6px">
+          <div style="display:flex;gap:10px;justify-content:center;padding-bottom:6px;flex-wrap:wrap">
             <button class="btn btn-gold" id="btn-run-deduce">${ic('ff', 14)}推进一轮推演</button>
+            <button class="btn" id="btn-llm-logs">${ic('brain', 14)}AI 调用日志</button>
             <button class="btn" id="btn-deduce-info">${ic('info', 14)}推演机制</button>
           </div>
+          ${llmTotals ? `<div class="mono" style="text-align:center;font-size:11.5px;color:var(--tx-2);padding-bottom:4px">服务端累计 AI 调用 <b style="color:var(--cyan,#5fd6e6)">${llmTotals.calls || 0}</b> 次 · 成功 ${llmTotals.ok || 0} · 失败 ${llmTotals.fail || 0} · 总耗时 ${llmTotals.ms || 0}ms</div>` : ''}
         </div>
 
         <!-- Agent 决策 -->
@@ -1053,18 +1056,100 @@ GE.panels = (function () {
     root.querySelector('#btn-run-deduce').addEventListener('click', () => {
       runPipeline(root);
     });
+    root.querySelector('#btn-llm-logs')?.addEventListener('click', () => openLlmLogs());
     root.querySelector('#btn-deduce-info').addEventListener('click', () => {
-      GE.toast.show({ type: 'info', icon: 'brain', title: '推演机制', msg: '各文明 Agent 提交决策后，大模型从六个角度并行推演多轮，收敛为世界变量改写（mvu），载入大事记并埋下暗线。' });
+      GE.toast.show({ type: 'info', icon: 'brain', title: '推演机制', msg: '各文明 Agent 提交决策后，规则或 hybrid LLM 产出决策；六棱镜收敛世界变量，载入大事记。点「AI 调用日志」可查看每次模型调用次数与返回内容。' });
     });
   }
 
   function logCard(l) {
+    const meta = l.agentMeta || {};
+    const nLogs = (l.llmLogs && l.llmLogs.length) || 0;
+    const calls = meta.llmCalls != null ? meta.llmCalls : nLogs;
+    const mode = l.agentMode || meta.used || 'rules_only';
+    const fb = meta.fallback ? ` · 回落 ${meta.fallback}` : '';
     return `<div class="panel" style="border-left:3px solid var(--gold)">
-      <div style="display:flex;align-items:center;gap:9px">
+      <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
         <span class="badge badge-gold mono">第 ${l.round} 轮</span>
         <span class="tx2 mono" style="font-size:11px">${esc(l.year)}</span>
+        <span class="badge ${calls ? 'badge-cyan' : ''}" style="font-size:10px">${esc(mode)} · AI×${calls}${fb}</span>
       </div>
-      <p class="prose" style="font-size:12.5px;margin-top:8px">${esc(l.summary)}</p></div>`;
+      <p class="prose" style="font-size:12.5px;margin-top:8px">${esc(l.summary)}</p>
+      ${nLogs ? `<details style="margin-top:8px"><summary class="mono" style="cursor:pointer;font-size:11.5px;color:var(--cyan,#5fd6e6)">本轮 AI 返回 · ${nLogs} 条</summary>
+        ${l.llmLogs.map(llmLogBlock).join('')}
+      </details>` : (calls === 0 && mode !== 'rules_only' ? `<div class="mono" style="font-size:11px;color:var(--tx-2);margin-top:6px">本轮未实际调用模型（${esc(meta.fallback || meta.error || '—')}）</div>` : '')}
+    </div>`;
+  }
+
+  function llmLogBlock(e) {
+    if (!e) return '';
+    const ok = e.ok ? 'OK' : 'FAIL';
+    const color = e.ok ? 'var(--cyan,#5fd6e6)' : 'var(--red,#e56b6b)';
+    return `<div class="panel" style="margin-top:8px;border-left:3px solid ${color};font-size:11.5px">
+      <div class="mono" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <span style="color:${color};font-weight:700">#${e.id} ${ok}</span>
+        <span>${esc(e.purpose || '')}</span>
+        <span>round ${e.round != null ? e.round : '—'}</span>
+        <span>${e.ms || 0}ms</span>
+        <span>${esc(e.model || '')}</span>
+        ${e.baseHost ? `<span class="tx2">${esc(e.baseHost)}</span>` : ''}
+        ${e.applied != null ? `<span>applied=${e.applied}</span>` : ''}
+      </div>
+      ${e.error ? `<div style="color:var(--red,#e56b6b);margin-top:4px">${esc(e.error)}</div>` : ''}
+      ${e.content ? `<pre class="mono" style="margin:8px 0 0;padding:8px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:rgba(0,0,0,.25);border-radius:6px;font-size:11px">${esc(e.content)}</pre>` : '<div class="tx2" style="margin-top:4px">（无返回正文）</div>'}
+    </div>`;
+  }
+
+  async function openLlmLogs() {
+    const rootBase = (GE.llmConfig && GE.llmConfig.worldBase) ? GE.llmConfig.worldBase() : '';
+    const url = `${rootBase}/api/v1/llm-logs?limit=40`;
+    let remote = null;
+    let err = null;
+    try {
+      const res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+      remote = await res.json();
+      if (!res.ok) err = remote.error || `HTTP ${res.status}`;
+    } catch (e) {
+      err = String(e && e.message || e);
+    }
+    const local = (GE.data && GE.data.llmLogs) || [];
+    const items = (remote && remote.items) || local;
+    const totals = (remote && remote.totals) || (GE.data && GE.data.llmTotals) || { calls: 0, ok: 0, fail: 0, ms: 0 };
+
+    GE.modal.open({
+      id: 'llm-logs',
+      title: 'AI 调用日志',
+      subtitle: `累计 ${totals.calls || 0} 次 · 成功 ${totals.ok || 0} · 失败 ${totals.fail || 0} · ${totals.ms || 0}ms`,
+      icon: 'brain',
+      accent: '#5fd6e6',
+      size: 'lg',
+      body: `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <button class="btn btn-sm" id="btn-llm-logs-refresh">${ic('network', 12)}刷新</button>
+          <button class="btn btn-sm" id="btn-llm-logs-clear">清空服务端缓冲</button>
+          <span class="mono tx2" style="font-size:11px;align-self:center">${err ? '拉取失败：' + esc(err) + ' · 显示本地缓存' : '来源：GET /api/v1/llm-logs'}</span>
+        </div>
+        <div id="llm-logs-list" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto">
+          ${items.length ? items.map(llmLogBlock).join('') : '<div class="panel tx2">暂无 AI 调用记录。启用 hybrid 并配置密钥后推进一轮推演即可产生日志。</div>'}
+        </div>`,
+      onOpen: (body) => {
+        body.querySelector('#btn-llm-logs-refresh')?.addEventListener('click', () => {
+          GE.modal.close();
+          openLlmLogs();
+        });
+        body.querySelector('#btn-llm-logs-clear')?.addEventListener('click', async () => {
+          try {
+            await fetch(`${rootBase}/api/v1/llm-logs`, { method: 'DELETE' });
+            if (GE.data) { GE.data.llmLogs = []; GE.data.llmTotals = { calls: 0, ok: 0, fail: 0, ms: 0 }; }
+            GE.toast.info('已清空', '服务端 LLM 日志缓冲已清空');
+            GE.modal.close();
+            openLlmLogs();
+          } catch (e) {
+            GE.toast.warn('清空失败', String(e && e.message || e));
+          }
+        });
+      }
+    });
   }
 
   function runPipeline(root) {
@@ -1106,6 +1191,6 @@ GE.panels = (function () {
   /* ============ 导出 ============ */
   return {
     openCiv, openLeader, openStation, openPlanetInfo, openChronicle,
-    openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openWarehouse, openRegion
+    openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openLlmLogs, openWarehouse, openRegion
   };
 })();

@@ -24,11 +24,9 @@ const DEFAULTS = {
   updatedAt: null
 };
 
-let state = loadFromDisk();
-
-function sanitize(partial) {
+function sanitize(partial, base) {
   const src = partial && typeof partial === 'object' ? partial : {};
-  const next = Object.assign({}, DEFAULTS, state, src);
+  const next = Object.assign({}, DEFAULTS, base || {}, src);
   next.enabled = !!next.enabled;
   const mode = String(next.agentMode || 'rules_only');
   next.agentMode = (mode === 'hybrid' || mode === 'full') ? mode : 'rules_only';
@@ -50,12 +48,14 @@ function loadFromDisk() {
     if (!fs.existsSync(STORE_PATH)) return Object.assign({}, DEFAULTS);
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
     const parsed = JSON.parse(raw);
-    return sanitize(parsed);
+    return sanitize(parsed, DEFAULTS);
   } catch (err) {
     console.warn('[llm-settings] load failed:', err && err.message);
     return Object.assign({}, DEFAULTS);
   }
 }
+
+let state = loadFromDisk();
 
 function persist() {
   try {
@@ -96,7 +96,7 @@ function getPublic(opts) {
 }
 
 function set(partial) {
-  state = sanitize(partial);
+  state = sanitize(partial, state);
   state.updatedAt = new Date().toISOString();
   persist();
   return get();

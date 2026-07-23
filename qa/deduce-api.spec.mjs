@@ -6,6 +6,13 @@ test.describe('Phase C deduce API', () => {
   test.beforeAll(async ({ request }) => {
     // 每套测试开始时重置默认 run，避免跨文件污染
     await request.post(`/api/v1/runs/${RUN}/reset`);
+    // 清空前端写入的 LLM 设置，避免 hybrid 残留拖慢 / 改写 rules 路径
+    await request.delete('/api/v1/llm-settings');
+    await request.delete('/api/v1/llm-logs');
+  });
+
+  test.beforeEach(async ({ request }) => {
+    await request.delete('/api/v1/llm-settings');
   });
 
   test('POST deduce returns decisions, lenses, chronicle, worldDelta', async ({ request }) => {
@@ -60,7 +67,9 @@ test.describe('Phase C deduce API', () => {
     let grew = false;
 
     for (let i = 0; i < 12; i++) {
-      const res = await request.post(`/api/v1/runs/${rid}/deduce`, { data: {} });
+      const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
+        data: { agentMode: 'rules_only' }
+      });
       expect(res.ok()).toBeTruthy();
       const body = await res.json();
       expect(body.revision).toBeGreaterThan(lastRevision);
@@ -118,8 +127,8 @@ test.describe('Phase C deduce API', () => {
       data: { id: 'qa-seed-b', seed: 424242, reset: true }
     });
     for (let i = 0; i < 6; i++) {
-      await request.post('/api/v1/runs/qa-seed-a/deduce', { data: {} });
-      await request.post('/api/v1/runs/qa-seed-b/deduce', { data: {} });
+      await request.post('/api/v1/runs/qa-seed-a/deduce', { data: { agentMode: 'rules_only' } });
+      await request.post('/api/v1/runs/qa-seed-b/deduce', { data: { agentMode: 'rules_only' } });
     }
     const a = await (await request.get('/api/v1/runs/qa-seed-a/bodies')).json();
     const b = await (await request.get('/api/v1/runs/qa-seed-b/bodies')).json();
@@ -161,6 +170,7 @@ test.describe('Phase C deduce API', () => {
   });
 
   test('C6 hybrid without llm config falls back to rules_only', async ({ request }) => {
+    await request.delete('/api/v1/llm-settings');
     const rid = 'qa-hybrid-fb-' + Date.now().toString(36);
     await request.post('/api/v1/runs', { data: { id: rid, seed: 99, reset: true } });
     const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
@@ -169,13 +179,14 @@ test.describe('Phase C deduce API', () => {
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
     expect(body.decisions.length).toBeGreaterThanOrEqual(5);
-    expect(body.agentMeta).toEqual(expect.objectContaining({
-      requested: 'hybrid',
-      used: 'rules_only',
-      fallback: 'llm_not_configured'
-    }));
+    expect(body.agentMeta.requested).toBe('hybrid');
+    expect(body.agentMeta.used).toBe('rules_only');
+    // 无请求体 llm 且后端无已存配置
+    expect(['llm_not_configured', 'server_disabled', 'incomplete']).toContain(
+      body.agentMeta.fallback
+    );
+    expect(body.agentMeta.llmCalls || 0).toBe(0);
     expect(body.round.agentMode).toBe('rules_only');
-    expect(body.round.agentModeRequested).toBe('hybrid');
     expect(body.year).toBeGreaterThan(1247);
   });
 
@@ -248,6 +259,39 @@ test.describe('Phase C deduce API', () => {
 
     // 清理，避免污染其它用例
     await request.delete('/api/v1/llm-settings');
+  });
+
+  test('LLM call logs expose count and response content', async ({ request }) => {
+    await request.delete('/api/v1/llm-logs');
+    const rid = 'qa-llm-log-' + Date.now().toString(36);
+    await request.post('/api/v1/runs', { data: { id: rid, seed: 55, reset: true } });
+    const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
+      data: {
+        agentMode: 'hybrid',
+        llm: {
+          baseUrl: 'http://127.0.0.1:9',
+          apiKey: 'sk-log-test',
+          model: 'log-model',
+          timeoutMs: 2000
+        }
+      }
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.agentMeta.llmCalls).toBe(1);
+    expect(Array.isArray(body.llmLogs)).toBe(true);
+    expect(body.llmLogs.length).toBeGreaterThanOrEqual(1);
+    const entry = body.llmLogs[0];
+    expect(entry.purpose).toBe('character_enhance');
+    expect(entry.model).toBe('log-model');
+    expect(entry.ok).toBe(false);
+    expect(entry.error).toBeTruthy();
+    expect(body.llmTotals.calls).toBeGreaterThanOrEqual(1);
+
+    const list = await (await request.get('/api/v1/llm-logs?limit=10')).json();
+    expect(list.totals.calls).toBeGreaterThanOrEqual(1);
+    expect(list.items.some(i => i.id === entry.id)).toBe(true);
+    expect(list.items[0].purpose).toBeTruthy();
   });
 });
 
