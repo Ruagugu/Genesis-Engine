@@ -1047,10 +1047,19 @@ GE.views.planet = (function () {
   function handleHover(e) {
     const now = performance.now();
     if (now - hoverT < 40) return; hoverT = now;
-    if (pickStation(e)) {
+    const facHover = pickFacility(e);
+    if (facHover) {
       env.dom.style.cursor = 'pointer';
-      GE.app.showHoverCard(e, { title: '望舒轨道站', sub: '晨曦联邦 · 轨道前哨', rows: [['状态', '稳定运行'], ['驻员', '86 人']] });
-      hoverHex.visible = false;
+      const body = facHover.body || {};
+      GE.app.showHoverCard(e, {
+        title: body.name || facHover.id || '轨道设施',
+        sub: (body.owner || body.civName || '在轨设施') + (body.subtype ? ' · ' + body.subtype : ''),
+        rows: [
+          ['类型', body.type || '空间站'],
+          ['状态', (body.flags && body.flags.status) || body.status || '运行中']
+        ]
+      });
+      if (hoverHex) hoverHex.visible = false;
       return;
     }
     const hex = pickHex(e);

@@ -92,3 +92,19 @@ test('merged warehouse uses empire totals without switching surfaces', async ({ 
   expect(result.resourceKeys).toHaveLength(12);
   expect(result.finite).toBe(true);
 });
+
+test('sparse warehouse state survives reload', async ({ page }) => {
+  const before = await page.evaluate(() => {
+    GE.worldState.advanceTurn();
+    const w = GE.worldState.getWarehouse('dawn');
+    return { revision: GE.worldState.revision, food: w.stock.food, key: GE.worldState.active.storageKey };
+  });
+  await page.reload();
+  await page.waitForFunction(() => window.GE && GE.app && GE.app.state && GE.app.state.started, null, { timeout: 30000 });
+  const after = await page.evaluate(() => {
+    const w = GE.worldState.getWarehouse('dawn');
+    return { revision: GE.worldState.revision, food: w.stock.food };
+  });
+  expect(after.revision).toBe(before.revision);
+  expect(after.food).toBe(before.food);
+});

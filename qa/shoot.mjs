@@ -56,6 +56,60 @@ await step('02 星球放大看地块', async () => {
   await shot('02-planet-close');
 });
 
+await step('02b 战略政治层（归属开）', async () => {
+  await page.evaluate(() => {
+    ['labels', 'grid', 'regions', 'ownership', 'assets', 'orbit', 'coverage', 'atmo'].forEach(k => {
+      if (GE.app && GE.app.state) GE.app.state.layer[k] = true;
+      if (GE.views.planet && GE.views.planet.setLayer) GE.views.planet.setLayer(k, true);
+    });
+  });
+  await sleep(500);
+  await shot('02b-strategic-ownership');
+});
+
+await step('02c 地区边界与着色', async () => {
+  await page.evaluate(() => {
+    const first = GE.worldState.regions[0];
+    if (first) GE.views.planet.focusRegion(first.id);
+  });
+  await sleep(1400);
+  await shot('02c-region-focus');
+});
+
+await step('02d 选中有主战略地块', async () => {
+  const owned = await page.evaluate(() => {
+    const t = GE.worldState.tiles.find(x => x.ownerCivId && x.resources.length);
+    if (!t) return null;
+    GE.views.planet.focusTile(t.id);
+    GE.app.showTileContext(t.id);
+    return t.id;
+  });
+  await sleep(1200);
+  if (!owned) throw new Error('未找到有主资源地块');
+  await shot('02d-tile-owned');
+});
+
+await step('02e 选中无主战略地块', async () => {
+  const free = await page.evaluate(() => {
+    const t = GE.worldState.tiles.find(x => !x.ownerCivId && x.terrain !== 'ocean');
+    if (!t) return null;
+    GE.views.planet.focusTile(t.id);
+    GE.app.showTileContext(t.id);
+    return t.id;
+  });
+  await sleep(1000);
+  if (!free) throw new Error('未找到无主陆块');
+  await shot('02e-tile-unowned');
+});
+
+await step('02f 国家仓储面板', async () => {
+  await page.evaluate(() => GE.panels.openWarehouse('dawn'));
+  await page.waitForSelector('.warehouse-row', { timeout: 5000 });
+  await sleep(500);
+  await shot('02f-warehouse');
+  await esc(); await sleep(300);
+});
+
 await step('03 宇宙地图', async () => {
   await page.click('#vs-universe'); await sleep(1700); await shot('03-universe');
 });
@@ -94,6 +148,10 @@ await step('09 科技树', async () => {
 
 await step('10 疆域与资产', async () => {
   await page.click('.modal-tab[data-tab="realm"]'); await sleep(700); await shot('10-civ-realm');
+});
+
+await step('10b 国家仓储标签', async () => {
+  await page.click('.modal-tab[data-tab="warehouse"]'); await sleep(700); await shot('10b-civ-warehouse');
 });
 
 await step('11 领袖档案', async () => {
