@@ -1,5 +1,7 @@
 {
   "scripts": {
+    "start": "node server/api.mjs",
+    "serve": "node server/api.mjs",
     "test:qa": "playwright test",
     "qa:shots": "node qa/shoot.mjs"
   },

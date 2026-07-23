@@ -66,8 +66,33 @@ GE.app = (function () {
   let resizeTimer = 0;
 
   /* ============ 启动 ============ */
-  function boot() {
+  async function boot() {
     decorateIcons();
+    const bootStatus = document.getElementById('boot-status');
+    const bootFill = document.getElementById('boot-fill');
+    try {
+      if (bootStatus) bootStatus.textContent = '载入世界快照 …';
+      if (bootFill) bootFill.style.width = '12%';
+      if (GE.snapshot && GE.snapshot.hydrate) {
+        await GE.snapshot.hydrate();
+      }
+      state.deductionRound = (GE.data.deduction.log[0] && GE.data.deduction.log[0].round) || 0;
+      state.simulatedYear = GE.data.world.年数 || 0;
+    } catch (err) {
+      console.error('[创世引擎] 快照水合失败', err);
+      if (bootStatus) {
+        bootStatus.textContent = '快照载入失败，回退本地种子';
+        bootStatus.style.color = 'var(--amber, #d8b76a)';
+      }
+      // http 失败时保留 data.world.js 种子，继续启动
+      if (GE.snapshot) {
+        try {
+          GE.snapshot.mode = 'local';
+          GE.snapshot.last = GE.snapshot.buildFromData(GE.data, { runId: 'local-fallback' });
+        } catch (_) { /* ignore */ }
+      }
+    }
+
     if (GE.surfaces) GE.surfaces.init();
     hydrateWorldStrip();
     renderCivDock();
