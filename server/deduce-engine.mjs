@@ -1,6 +1,7 @@
 /* ============================================================
-   创世引擎 · rules_only 真推演引擎（阶段 C）
-   Character 规则决策 → LensCritic → Resolver → WorldBuilder
+   创世引擎 · 真推演引擎（阶段 C / C6）
+   Character 规则决策 →（可选 LLM hybrid）→ LensCritic → Resolver → WorldBuilder
+   agentMode: rules_only | hybrid | full
    ============================================================ */
 import {
   mulberry32,
@@ -12,6 +13,7 @@ import {
   periodFor
 } from './procedural-universe.mjs';
 import { clone, touch } from './run-store.mjs';
+import { chat as llmChat, parseJsonLoose, llmConfigured } from './llm-provider.mjs';
 
 const LENS_KEYS = ['政治', '军事', '经济', '科技', '思潮', '个人'];
 
@@ -20,6 +22,12 @@ const CAPS = {
   maxNewSystemsDetailed: 1,
   maxNewBodies: 12
 };
+
+const ALLOWED_KINDS = new Set([
+  'policy', 'diplomacy', 'research', 'military', 'faith', 'trade',
+  'explore.system', 'galaxy.probe', 'explore.body',
+  'station.build', 'facility.deploy'
+]);
 
 const FACILITY_KINDS = [
   { action: 'station.build', type: '空间站', facilityKind: 'outpost', visualClass: 'station_modular', costHint: 'alloys' },
@@ -460,27 +468,7 @@ function buildChronicle(run, decisions, worldDelta, lenses, edict) {
   return entry;
 }
 
-/**
- * 主入口：推进一轮
- * @param {object} run
- * @param {{ force?: boolean, edict?: string }} opts
- */
-function deduce(run, opts) {
-  opts = opts || {};
-  const roundN = (run.deductionRounds?.length || 0) + 1;
-  const seed = (run.seed ^ (run.revision * 2654435761) ^ (roundN * 40503)) >>> 0;
-  const rnd = mulberry32(seed);
-
-  // 1) Character
-  let decisions = characterDecisions(run, rnd);
-
-  // 神谕：不替代人物决策，但覆盖叙事；仍保留决策供编年挂名
-  if (opts.edict) {
-    // 轻量：不强制 explore/facility，除非 force
-  }
-
-  // 2) 裁剪：单回合设施/探测帽（在 WorldBuilder 再强制）
-  // 若没有任何 explore/facility，rules_only 仍可能只做政策——验收需要增长时
+function applySoftGuarantees(run, decisions, roundN, opts) {
   // 每 2 轮保证至少一次弱探测意图（由最高战略人物挂名）
   if (!opts.edict && roundN % 2 === 0) {
     const hasExplore = decisions.some(d => EXPLORE_ACTIONS.includes(d.kind));
@@ -512,14 +500,277 @@ function deduce(run, opts) {
       }
     }
   }
+  return decisions;
+}
+
+function resolveAgentMode(run, opts) {
+  const raw = (opts && opts.agentMode) || run.agentMode || 'rules_only';
+  if (raw === 'hybrid' || raw === 'full') return raw;
+  return 'rules_only';
+}
+
+/**
+ * hybrid/full：用一次批量 LLM 调用润色 / 改写规则决策；失败整批回落规则。
+ * @returns {Promise<{ decisions: object[], lenses: object|null, meta: object }>}
+ */
+async function enhanceWithLlm(run, decisions, opts, agentMode) {
+  const meta = {
+    requested: agentMode,
+    used: 'rules_only',
+    llmCalls: 0,
+    llmMs: 0,
+    fallback: null,
+    error: null
+  };
+  const llm = opts && opts.llm;
+  if (!llmConfigured(llm)) {
+    meta.fallback = 'llm_not_configured';
+    return { decisions, lenses: null, meta };
+  }
+
+  const roster = decisions.map(d => ({
+    characterId: d.characterId,
+    characterName: d.characterName,
+    civId: d.civId,
+    civName: d.civName,
+    role: d.role,
+    stance: d.stance,
+    ruleKind: d.kind,
+    ruleDecision: d.decision,
+    urgency: d.urgency
+  }));
+
+  const worldBrief = {
+    year: run.year,
+    era: run.era,
+    bodyCount: (run.discovered?.bodies || []).length,
+    galaxyCount: (run.discovered?.galaxies || []).length,
+    recentFacilities: (run.discovered?.bodies || [])
+      .filter(b => b.flags && b.flags.artificial)
+      .slice(-4)
+      .map(b => b.name)
+  };
+
+  const kindList = [...ALLOWED_KINDS].join(', ');
+  const system = [
+    '你是创世引擎推演中的 CharacterAgent 编排器。',
+    '根据各人物设定与规则草稿，输出本轮最终决策。',
+    '硬约束：',
+    `- kind 必须是以下之一：${kindList}`,
+    '- 每人恰好 1 条决策；characterId 必须与输入一致，不得新增人物',
+    '- decision 用中文，以「人名：」开头，体现英雄史观，30～80 字',
+    '- 不要解释过程，只输出一个 JSON 对象',
+    'JSON schema:',
+    '{"decisions":[{"characterId":"","kind":"","decision":"","urgency":"高|中|低"}],',
+    '"lenses":{"政治":"","军事":"","经济":"","科技":"","思潮":"","个人":""}}'
+  ].join('\n');
+
+  const user = JSON.stringify({
+    mode: agentMode,
+    world: worldBrief,
+    draftDecisions: roster,
+    note: agentMode === 'full'
+      ? '可较大幅度改写 kind 与文案，但仍须服务人物立场与世界因果。'
+      : '以规则草稿为底，润色文案；仅在明显更合理时微调 kind。'
+  }, null, 0);
+
+  const timeoutMs = Math.max(4000, Math.min(Number(llm.timeoutMs) || 25000, 60000));
+  const result = await llmChat(
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    {
+      baseUrl: llm.baseUrl,
+      apiKey: llm.apiKey,
+      model: llm.model,
+      temperature: llm.temperature != null ? llm.temperature : (agentMode === 'full' ? 0.85 : 0.65),
+      timeoutMs
+    }
+  );
+  meta.llmCalls = 1;
+  meta.llmMs = result.ms || 0;
+
+  if (!result.ok) {
+    meta.fallback = 'llm_error';
+    meta.error = result.error || 'llm_failed';
+    return { decisions, lenses: null, meta };
+  }
+
+  const parsed = parseJsonLoose(result.content);
+  if (!parsed || !Array.isArray(parsed.decisions)) {
+    meta.fallback = 'llm_parse_error';
+    meta.error = 'invalid_json';
+    return { decisions, lenses: null, meta };
+  }
+
+  const byId = new Map(decisions.map(d => [d.characterId, d]));
+  let applied = 0;
+  parsed.decisions.forEach(item => {
+    if (!item || !item.characterId) return;
+    const base = byId.get(item.characterId);
+    if (!base) return;
+    const kind = String(item.kind || '').trim();
+    if (ALLOWED_KINDS.has(kind)) base.kind = kind;
+    const text = String(item.decision || '').trim();
+    if (text) {
+      // 保证挂人名
+      base.decision = text.includes(base.characterName)
+        ? text.slice(0, 160)
+        : `${base.characterName}：${text.slice(0, 140)}`;
+    }
+    if (item.urgency && /高|中|低/.test(String(item.urgency))) {
+      base.urgency = String(item.urgency);
+    }
+    base.source = 'llm';
+    applied++;
+  });
+
+  if (applied === 0) {
+    meta.fallback = 'llm_no_match';
+    meta.error = 'no_character_matched';
+    return { decisions, lenses: null, meta };
+  }
+
+  let lenses = null;
+  if (parsed.lenses && typeof parsed.lenses === 'object') {
+    lenses = {};
+    LENS_KEYS.forEach(k => {
+      const v = parsed.lenses[k];
+      if (v != null && String(v).trim()) lenses[k] = String(v).trim().slice(0, 120);
+    });
+    if (!Object.keys(lenses).length) lenses = null;
+  }
+
+  meta.used = agentMode;
+  meta.applied = applied;
+  return { decisions, lenses, meta };
+}
+
+/**
+ * 可选：为新发现天体润色中文名 / 描述（失败静默忽略）
+ */
+async function detailFillBodies(run, worldDelta, opts, agentMode, llmMeta) {
+  if (agentMode === 'rules_only') return;
+  if (!llmConfigured(opts && opts.llm)) return;
+  const candidates = (worldDelta.newBodies || []).filter(b =>
+    b && !b.flags?.artificial && b.completeness === 'detailed'
+  ).slice(0, 6);
+  if (!candidates.length) return;
+
+  const payload = candidates.map(b => ({
+    id: b.id,
+    type: b.type,
+    subtype: b.subtype,
+    name: b.name,
+    desc: b.desc
+  }));
+  const result = await llmChat(
+    [
+      {
+        role: 'system',
+        content: [
+          '你为科幻推演润色新发现天体的中文名与一句描述。',
+          '输出 JSON：{"items":[{"id":"","name":"两字或三字中文名","desc":"一句中文"}]}',
+          '名须典雅、不与常见地名雷同；不要解释。'
+        ].join('\n')
+      },
+      { role: 'user', content: JSON.stringify({ bodies: payload }) }
+    ],
+    {
+      baseUrl: opts.llm.baseUrl,
+      apiKey: opts.llm.apiKey,
+      model: opts.llm.model,
+      temperature: 0.8,
+      timeoutMs: Math.min(Number(opts.llm.timeoutMs) || 20000, 20000)
+    }
+  );
+  llmMeta.llmCalls = (llmMeta.llmCalls || 0) + 1;
+  llmMeta.llmMs = (llmMeta.llmMs || 0) + (result.ms || 0);
+  if (!result.ok) return;
+  const parsed = parseJsonLoose(result.content);
+  if (!parsed || !Array.isArray(parsed.items)) return;
+
+  const runBodies = run.discovered.bodies || [];
+  parsed.items.forEach(item => {
+    if (!item || !item.id) return;
+    const name = String(item.name || '').trim().slice(0, 12);
+    const desc = String(item.desc || '').trim().slice(0, 160);
+    if (!name && !desc) return;
+    const patch = (body) => {
+      if (!body || body.id !== item.id) return;
+      if (name) body.name = name;
+      if (desc) body.desc = desc;
+    };
+    worldDelta.newBodies.forEach(patch);
+    runBodies.forEach(patch);
+  });
+  llmMeta.detailFill = true;
+}
+
+/**
+ * 主入口：推进一轮（async；rules_only 不发起网络）
+ * @param {object} run
+ * @param {{ force?: boolean, edict?: string, agentMode?: string, llm?: object }} opts
+ */
+async function deduce(run, opts) {
+  opts = opts || {};
+  const roundN = (run.deductionRounds?.length || 0) + 1;
+  const seed = (run.seed ^ (run.revision * 2654435761) ^ (roundN * 40503)) >>> 0;
+  const rnd = mulberry32(seed);
+  const agentMode = resolveAgentMode(run, opts);
+  // 本轮生效模式写入 run，便于后续 snapshot / health
+  run.agentMode = agentMode;
+
+  // 1) Character（规则底稿）
+  let decisions = characterDecisions(run, rnd);
+
+  // 神谕：不替代人物决策，但覆盖叙事；仍保留决策供编年挂名
+  if (opts.edict) {
+    // 轻量：不强制 explore/facility，除非 force
+  }
+
+  // 2) 软保底（explore / facility）—— LLM 前后都要保证无限宇宙增长
+  applySoftGuarantees(run, decisions, roundN, opts);
+
+  // 2b) C6 hybrid / full：LLM 润色；失败回落规则底稿
+  let llmMeta = {
+    requested: agentMode,
+    used: 'rules_only',
+    llmCalls: 0,
+    llmMs: 0,
+    fallback: agentMode === 'rules_only' ? null : 'skipped',
+    error: null
+  };
+  let llmLenses = null;
+  if (agentMode !== 'rules_only') {
+    const enhanced = await enhanceWithLlm(run, decisions, opts, agentMode);
+    decisions = enhanced.decisions;
+    llmLenses = enhanced.lenses;
+    llmMeta = enhanced.meta;
+    // LLM 可能改掉 kind，再跑一遍软保底
+    applySoftGuarantees(run, decisions, roundN, opts);
+  }
 
   // 3) Lens
-  const lenses = lensTemplates(decisions, opts.edict);
+  let lenses = lensTemplates(decisions, opts.edict);
+  if (llmLenses) {
+    lenses = Object.assign({}, lenses, llmLenses);
+  }
 
   // 4) WorldBuilder
   const worldDelta = opts.edict && !opts.force
     ? { newGalaxies: [], newSystems: [], newBodies: [], updatedBodies: [], removedBodyIds: [] }
     : worldBuilder(run, decisions, rnd);
+
+  // 4b) DetailFiller（仅 hybrid/full，失败静默）
+  if (agentMode !== 'rules_only' && llmMeta.used !== 'rules_only') {
+    try {
+      await detailFillBodies(run, worldDelta, opts, agentMode, llmMeta);
+    } catch (err) {
+      llmMeta.detailFillError = String(err && err.message || err);
+    }
+  }
 
   // 5) Resolver
   const { yearDelta, patches } = applyResolver(run, decisions, lenses, opts.edict);
@@ -539,13 +790,15 @@ function deduce(run, opts) {
       characterName: d.characterName,
       civId: d.civId,
       kind: d.kind,
-      decision: d.decision
+      decision: d.decision,
+      source: d.source || 'rules'
     })),
     worldDelta: {
       newGalaxies: worldDelta.newGalaxies.length,
       newSystems: worldDelta.newSystems.length,
       newBodies: worldDelta.newBodies.length
-    }
+    },
+    agentMeta: llmMeta
   };
   run.deduction.log = run.deduction.log || [];
   run.deduction.log.unshift(log);
@@ -556,7 +809,14 @@ function deduce(run, opts) {
     phase: 'done',
     year: run.year,
     revision: run.revision,
-    agentMode: run.agentMode || 'rules_only',
+    agentMode: llmMeta.used || agentMode,
+    agentModeRequested: agentMode,
+    llm: {
+      calls: llmMeta.llmCalls || 0,
+      ms: llmMeta.llmMs || 0,
+      fallback: llmMeta.fallback || null,
+      error: llmMeta.error || null
+    },
     edict: opts.edict || null
   };
   run.deductionRounds = run.deductionRounds || [];
@@ -577,14 +837,16 @@ function deduce(run, opts) {
       kind: d.kind,
       decision: d.decision,
       urgency: d.urgency,
-      stance: d.stance
+      stance: d.stance,
+      source: d.source || 'rules'
     })),
     lenses,
     patchesSummary: patches,
     worldDelta,
     chronicle: [chronicleEntry],
-    yearDelta
+    yearDelta,
+    agentMeta: llmMeta
   };
 }
 
-export { deduce, CAPS, LENS_KEYS, characterDecisions, validateBody };
+export { deduce, CAPS, LENS_KEYS, characterDecisions, validateBody, resolveAgentMode };

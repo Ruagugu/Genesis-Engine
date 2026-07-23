@@ -113,11 +113,13 @@ async function handleApi(req, res, urlPath) {
       schemaVersion: 1,
       phase: 'C',
       writeOps: true,
+      c6: true,
       writeAllow: [
         'POST /api/v1/runs',
         'POST /api/v1/runs/:id/deduce',
         'POST /api/v1/bodies/:id/surface/ensure'
       ],
+      agentModes: ['rules_only', 'hybrid', 'full'],
       agentMode: run.agentMode || 'rules_only',
       runId: run.id,
       revision: run.revision,
@@ -289,9 +291,21 @@ async function handleApi(req, res, urlPath) {
       return true;
     }
     try {
-      const result = deduce(run, {
+      // C6：前端可传 agentMode + llm（baseUrl/apiKey/model）；密钥不落盘
+      const llm = body.llm && typeof body.llm === 'object'
+        ? {
+            baseUrl: String(body.llm.baseUrl || '').slice(0, 400),
+            apiKey: String(body.llm.apiKey || '').slice(0, 400),
+            model: String(body.llm.model || '').slice(0, 120),
+            temperature: body.llm.temperature != null ? Number(body.llm.temperature) : undefined,
+            timeoutMs: body.llm.timeoutMs != null ? Number(body.llm.timeoutMs) : undefined
+          }
+        : null;
+      const result = await deduce(run, {
         force: !!body.force,
-        edict: body.edict || null
+        edict: body.edict || null,
+        agentMode: body.agentMode || null,
+        llm
       });
       json(res, 200, result);
     } catch (err) {

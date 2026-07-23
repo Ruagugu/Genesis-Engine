@@ -1,6 +1,6 @@
 # 创世引擎 · 阶段 C：真推演与无限宇宙
 
-> 状态：**C0–C4 已落地**（rules_only 真推演 + 无限骨架 + 设施上图）· 2026-07-24  
+> 状态：**C0–C6 已落地**（rules_only 真推演 + 无限骨架 + 设施上图 + hybrid LLM 插口）· 2026-07-24  
 > 产品契约确认日：2026-07-23  
 
 > 对齐：`docs/backend-agent-architecture.md` §4 / §5 / §6.4 / §7 阶段 C；`docs/snapshot-api.md` 阶段边界  
@@ -335,9 +335,10 @@ interface Run {
 
 ### C6 —（可选 C.2）LLM 插口
 
-- [ ] Provider 接入 deduce（读 `GE.llmConfig`，`agentMode=hybrid`）
-- [ ] DetailFiller / Character 可切换 LLM；超时回落规则
-- [x] 前端配置 UI + `js/llm-config.js` 存储 / listModels / chat（插口就绪）
+- [x] Provider 接入 deduce（`server/llm-provider.mjs`；请求体带 `agentMode` + `llm`）
+- [x] Character 批量润色 + 可选 DetailFiller；超时 / 解析失败回落 rules_only
+- [x] 前端配置 UI + `js/llm-config.js` 存储 / listModels / chat；`runDeduction` 转发凭证
+- [x] 密钥仅随 deduce 转发、服务端不落盘；未启用 / 凭证不全 / 网络失败 → 规则引擎
 
 ---
 

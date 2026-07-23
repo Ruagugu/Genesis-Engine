@@ -583,7 +583,7 @@ GE.app = (function () {
 
   function hideHoverCard() { hoverCard.hidden = true; }
 
-  /* ============ 真推演（阶段 C · 默认服务端 rules_only） ============ */
+  /* ============ 真推演（阶段 C · rules_only 默认；C6 hybrid/full 经 llmConfig） ============ */
   function mockDeductionEnabled() {
     try {
       const q = new URLSearchParams(location.search || '');
@@ -679,7 +679,8 @@ GE.app = (function () {
       lenses: result.lenses || {},
       decisions: result.decisions || [],
       worldDelta: result.worldDelta || null,
-      agentMode: (result.round && result.round.agentMode) || 'rules_only'
+      agentMode: (result.round && result.round.agentMode) || 'rules_only',
+      agentMeta: result.agentMeta || null
     };
     GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
     GE.data.deduction.log.unshift(log);
@@ -762,9 +763,36 @@ GE.app = (function () {
     return log;
   }
 
+  function buildDeducePayload(opts) {
+    opts = opts || {};
+    const payload = {
+      force: !!opts.force,
+      edict: opts.edict || null
+    };
+    // C6：从本机 llmConfig 带上 agentMode +（可选）LLM 凭证；仅当启用且 hybrid/full 时附密钥
+    let cfg = null;
+    try {
+      cfg = GE.llmConfig && typeof GE.llmConfig.get === 'function' ? GE.llmConfig.get() : null;
+    } catch (_) { cfg = null; }
+    const mode = (opts.agentMode || (cfg && cfg.agentMode) || 'rules_only');
+    payload.agentMode = mode;
+    if (cfg && cfg.enabled && (mode === 'hybrid' || mode === 'full')
+        && cfg.baseUrl && cfg.apiKey && cfg.model) {
+      payload.llm = {
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        temperature: cfg.temperature,
+        timeoutMs: cfg.timeoutMs || 25000
+      };
+    }
+    return payload;
+  }
+
   async function runDeduction(opts) {
     opts = opts || {};
     let log;
+    let agentMeta = null;
     if (mockDeductionEnabled()) {
       log = runMockDeduction(opts);
     } else {
@@ -774,10 +802,7 @@ GE.app = (function () {
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({
-            force: !!opts.force,
-            edict: opts.edict || null
-          }),
+          body: JSON.stringify(buildDeducePayload(opts)),
           cache: 'no-store'
         });
         if (!res.ok) {
@@ -785,7 +810,9 @@ GE.app = (function () {
           throw new Error(`deduce ${res.status}${text ? ': ' + text.slice(0, 160) : ''}`);
         }
         const result = await res.json();
+        agentMeta = result.agentMeta || (result.round && result.round.llm) || null;
         log = applyDeduceResult(result, opts);
+        if (log && result.agentMeta) log.agentMeta = result.agentMeta;
       } catch (err) {
         console.error('[创世引擎] 推演失败', err);
         GE.toast.show({
@@ -800,7 +827,13 @@ GE.app = (function () {
 
     GE.modal.close();
     const msg = log && log.summary ? log.summary : '推演已收敛';
-    GE.toast.show({ type: 'success', icon: 'checkC', title: `第 ${state.deductionRound} 轮推演已收敛`, msg });
+    let title = `第 ${state.deductionRound} 轮推演已收敛`;
+    if (agentMeta && agentMeta.used && agentMeta.used !== 'rules_only') {
+      title += ` · ${agentMeta.used}`;
+    } else if (agentMeta && agentMeta.fallback) {
+      title += ' · 规则回落';
+    }
+    GE.toast.show({ type: 'success', icon: 'checkC', title, msg });
     setTimeout(() => GE.toast.show({
       type: 'warn',
       icon: 'history',

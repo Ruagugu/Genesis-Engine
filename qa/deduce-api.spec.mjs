@@ -159,6 +159,50 @@ test.describe('Phase C deduce API', () => {
     const g = await get.json();
     expect(g.revision).toBe(0);
   });
+
+  test('C6 hybrid without llm config falls back to rules_only', async ({ request }) => {
+    const rid = 'qa-hybrid-fb-' + Date.now().toString(36);
+    await request.post('/api/v1/runs', { data: { id: rid, seed: 99, reset: true } });
+    const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
+      data: { agentMode: 'hybrid' }
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.decisions.length).toBeGreaterThanOrEqual(5);
+    expect(body.agentMeta).toEqual(expect.objectContaining({
+      requested: 'hybrid',
+      used: 'rules_only',
+      fallback: 'llm_not_configured'
+    }));
+    expect(body.round.agentMode).toBe('rules_only');
+    expect(body.round.agentModeRequested).toBe('hybrid');
+    expect(body.year).toBeGreaterThan(1247);
+  });
+
+  test('C6 hybrid with invalid key falls back without failing the round', async ({ request }) => {
+    const rid = 'qa-hybrid-badkey-' + Date.now().toString(36);
+    await request.post('/api/v1/runs', { data: { id: rid, seed: 101, reset: true } });
+    const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
+      data: {
+        agentMode: 'hybrid',
+        llm: {
+          baseUrl: 'http://127.0.0.1:9',
+          apiKey: 'sk-invalid-qa',
+          model: 'gpt-4o-mini',
+          timeoutMs: 2500
+        }
+      }
+    });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+    expect(body.decisions.length).toBeGreaterThanOrEqual(5);
+    expect(body.agentMeta.requested).toBe('hybrid');
+    expect(body.agentMeta.used).toBe('rules_only');
+    expect(body.agentMeta.fallback).toBe('llm_error');
+    expect(body.agentMeta.llmCalls).toBe(1);
+    expect(body.lenses.政治).toBeTruthy();
+    expect(body.round.llm.fallback).toBe('llm_error');
+  });
 });
 
 test.describe('Phase C frontend deduce wiring', () => {

@@ -811,7 +811,7 @@ GE.panels = (function () {
           </div>
           <div id="llm-status" class="mono" style="font-size:11.5px;color:var(--tx-2);min-height:1.4em;margin-top:4px"></div>
         </div>
-        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 密钥仅存本机 localStorage（ge-llm-config-v1），不会上传到创世引擎服务器。<strong>当前服务端推演固定 rules_only</strong>；hybrid / full 选项为 C6 插口，保存后不会改变本轮 deduce 行为。</div>`,
+        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 密钥默认存本机 localStorage（ge-llm-config-v1）。选择 <strong>hybrid / full</strong> 并启用 LLM 后，推演请求会把 Base URL / Key / Model <strong>临时发给本机创世引擎后端</strong> 代调供应商（不落盘）；失败自动回落 rules_only。生产环境请自备代理，勿把长期密钥暴露在不可信网络。</div>`,
       onOpen: (body) => {
         body.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => {
           GE.app.setQuality(b.dataset.q); GE.modal.close(); openSettings();
@@ -849,9 +849,17 @@ GE.panels = (function () {
         body.querySelector('#btn-llm-save')?.addEventListener('click', () => {
           const cfg = saveCfg();
           const mode = cfg && cfg.agentMode;
-          if (mode === 'hybrid' || mode === 'full') {
-            setStatus('已保存 · hybrid/full 为 C6 插口，当前推演仍走服务端 rules_only', true);
-            GE.toast.info('设置已保存', 'LLM 配置已落盘；真推演 hybrid 尚未接线，本轮仍为 rules_only。');
+          if ((mode === 'hybrid' || mode === 'full') && cfg && cfg.enabled) {
+            if (!cfg.apiKey || !cfg.model || !cfg.baseUrl) {
+              setStatus('已保存 · hybrid/full 需填完整 Base URL / Key / Model，否则推演回落 rules_only', true);
+              GE.toast.info('设置已保存', '模式已记；凭证不齐时 deduce 自动用规则引擎。');
+            } else {
+              setStatus(`已保存 · 下次推演将以 ${mode} 调用模型（失败回落规则）`, true);
+              GE.toast.success('设置已保存', `推演模式 ${mode}；密钥仅随 deduce 请求转发，不写服务器磁盘。`);
+            }
+          } else if (mode === 'hybrid' || mode === 'full') {
+            setStatus('已保存 · 请打开「启用 LLM」后 hybrid/full 才会调模型', true);
+            GE.toast.info('设置已保存', '模式已记；未启用 LLM 时推演仍走 rules_only。');
           } else {
             setStatus('已保存到本机', true);
             GE.toast.success('设置已保存', '模型与世界 API 配置已写入本地。');
@@ -910,7 +918,9 @@ GE.panels = (function () {
           body.querySelector(sel)?.addEventListener('change', () => {
             const cfg = saveCfg();
             if (sel === '#set-agent-mode' && cfg && (cfg.agentMode === 'hybrid' || cfg.agentMode === 'full')) {
-              setStatus('提示：hybrid/full 为 C6 预留，当前 deduce 固定 rules_only', true);
+              setStatus(cfg.enabled
+                ? `模式 ${cfg.agentMode}：推演时将尝试 LLM，失败回落规则`
+                : `模式 ${cfg.agentMode} 已记；请同时启用 LLM`, true);
             }
           });
         });
@@ -1033,7 +1043,7 @@ GE.panels = (function () {
 
   async function finish(root, btn) {
     try {
-      await GE.app.runDeduction();   // 服务端 rules_only 真推演
+      await GE.app.runDeduction();   // 服务端真推演（rules_only / hybrid 由 llmConfig）
     } finally {
       btn.disabled = false;
       btn.innerHTML = `${ic('ff', 14)}推进一轮推演`;
