@@ -174,18 +174,107 @@ GE.views.planet = (function () {
     }
   }
 
+  /**
+   * 按天体 type + climateProfile 解析程序化地表风格。
+   * style: 0 类地宜居 · 1 干旱岩质 · 2 气冷卫星 · 3 寒冷矮行星
+   */
+  function resolveBodyVisual(body) {
+    const cp = (body && body.climateProfile) || {};
+    const hydro = cp.hydrosphere != null ? cp.hydrosphere : 0.37;
+    const temp = cp.meanTemp || 'temperate';
+    const energy = cp.energyAffinity != null ? cp.energyAffinity : 0.4;
+    const type = (body && body.type) || '类地行星';
+    const seed = (body && (body.surfaceSeed != null ? body.surfaceSeed : body.flags && body.flags.seed)) || 0;
+    // 种子 → 着色器噪声偏移
+    const seedOff = new THREE.Vector3(
+      ((seed % 97) / 97) * 40 - 20,
+      (((seed / 97) | 0) % 53) / 53 * 40 - 20,
+      (((seed / 5141) | 0) % 71) / 71 * 40 - 20
+    );
+    const base = new THREE.Color((body && body.color) || '#4fa8e0');
+
+    let style = 0;
+    if (type === '类地行星' || (type === '岩质行星' && hydro > 0.25 && temp === 'temperate')) style = 0;
+    else if (type === '岩质行星' || temp === 'hot') style = 1;
+    else if (type === '卫星') style = 2;
+    else if (type === '矮行星' || temp === 'frigid') style = 3;
+    else if (type === '冰巨星') style = 3;
+    else style = 1;
+
+    // 大气 / 云 / 光照
+    let hasAtmo = 1, cloudAmount = 0.55, atmoCol = new THREE.Color(0x6fc3ff);
+    let ambientI = 0.85, sunI = 1.5, rimCol = new THREE.Color(0x336699);
+    if (style === 0) {
+      hasAtmo = 1; cloudAmount = Math.min(0.75, 0.25 + hydro * 1.1);
+      atmoCol = new THREE.Color(0x6fc3ff); rimCol = new THREE.Color(0x3377aa);
+      ambientI = 0.85; sunI = 1.5;
+    } else if (style === 1) {
+      hasAtmo = hydro > 0.04 ? 0.55 : 0.15;
+      cloudAmount = hydro > 0.1 ? 0.12 : 0.0;
+      atmoCol = base.clone().lerp(new THREE.Color(0xffaa66), 0.55);
+      rimCol = new THREE.Color(0xaa5522);
+      ambientI = 1.05; sunI = 1.95;
+    } else if (style === 2) {
+      hasAtmo = 0.0; cloudAmount = 0.0;
+      atmoCol = new THREE.Color(0x888899); rimCol = new THREE.Color(0x444455);
+      ambientI = 0.5; sunI = 1.15;
+    } else {
+      hasAtmo = 0.2; cloudAmount = 0.05;
+      atmoCol = new THREE.Color(0x6688aa); rimCol = new THREE.Color(0x334455);
+      ambientI = 0.48; sunI = 1.05;
+    }
+
+    return {
+      style, hydro, energy, seedOff, base,
+      hasAtmo, cloudAmount, atmoCol, rimCol, ambientI, sunI, temp, type
+    };
+  }
+
   function applyGlobePalette(bodyId) {
     const body = GE.data.spaceBodies.find(b => b.id === bodyId);
     if (!body || !globe || !globe.material || !globe.material.uniforms) return;
-    // 通过 sun 强度与 ambient 粗调非宜居体氛围
-    const hydro = (body.climateProfile && body.climateProfile.hydrosphere) || 0.37;
-    const cold = body.climateProfile && (body.climateProfile.meanTemp === 'cold' || body.climateProfile.meanTemp === 'frigid');
-    const hot = body.climateProfile && body.climateProfile.meanTemp === 'hot';
-    if (ambient) ambient.intensity = cold ? 0.55 : hot ? 1.05 : 0.85;
-    if (sunLight) sunLight.intensity = hot ? 1.9 : cold ? 1.1 : 1.5;
-    // 云层：干旱/冰月弱化
-    if (clouds) clouds.visible = hydro > 0.12;
-    if (atmo) atmo.visible = true;
+    const v = resolveBodyVisual(body);
+    const u = globe.material.uniforms;
+    u.uStyle.value = v.style;
+    u.uHydro.value = v.hydro;
+    u.uEnergy.value = v.energy;
+    u.uSeed.value.copy(v.seedOff);
+    u.uBase.value.copy(v.base);
+    u.uDark.value.copy(v.base.clone().multiplyScalar(0.35));
+    u.uLight.value.copy(v.base.clone().lerp(new THREE.Color(0xffffff), 0.4));
+    u.uRim.value.copy(v.rimCol);
+    u.uHasAtmo.value = v.hasAtmo;
+
+    if (ambient) ambient.intensity = v.ambientI;
+    if (sunLight) {
+      sunLight.intensity = v.sunI;
+      if (v.style === 1) sunLight.color.setHex(0xffe0b0);
+      else if (v.style === 2 || v.style === 3) sunLight.color.setHex(0xdde8ff);
+      else sunLight.color.setHex(0xfff2dd);
+    }
+
+    if (clouds) {
+      clouds.visible = v.cloudAmount > 0.05;
+      if (clouds.material.uniforms) {
+        clouds.material.uniforms.uAmount.value = v.cloudAmount;
+        clouds.material.uniforms.uTint.value.copy(
+          v.style === 1 ? new THREE.Color(0xffddaa) : new THREE.Color(0xffffff)
+        );
+      }
+    }
+    if (atmo) {
+      atmo.visible = v.hasAtmo > 0.08;
+      if (atmo.material.uniforms) {
+        atmo.material.uniforms.uAtmo.value.copy(v.atmoCol);
+        atmo.material.uniforms.uStrength.value = v.hasAtmo;
+      }
+    }
+    if (glow) {
+      glow.visible = v.hasAtmo > 0.08;
+      if (glow.material.uniforms && glow.material.uniforms.uGlow) {
+        glow.material.uniforms.uGlow.value.copy(v.atmoCol);
+      }
+    }
   }
 
   /* ============ 背景星空 ============ */
@@ -202,55 +291,125 @@ GE.views.planet = (function () {
     view.scene.add(starfield);
   }
 
-  /* ============ 星球本体（大陆 + 海洋 + 昼夜 + 冰盖 + 高光） ============ */
+  /* ============ 星球本体：按 type/climate 程序化地表 ============
+     uStyle 0 类地 · 1 干旱岩质 · 2 气冷卫星 · 3 寒冷矮行星 */
   function buildGlobe() {
     const geo = new THREE.SphereGeometry(R, 96, 96);
     const mat = new THREE.ShaderMaterial({
-      uniforms: { uSun: { value: sunDir }, uTime: { value: 0 } },
+      uniforms: {
+        uSun: { value: sunDir },
+        uTime: { value: 0 },
+        uStyle: { value: 0 },
+        uHydro: { value: 0.37 },
+        uEnergy: { value: 0.55 },
+        uSeed: { value: new THREE.Vector3(5, 0, 0) },
+        uBase: { value: new THREE.Color(0x4fa8e0) },
+        uDark: { value: new THREE.Color(0x1a3a55) },
+        uLight: { value: new THREE.Color(0xa8d8f0) },
+        uRim: { value: new THREE.Color(0x3377aa) },
+        uHasAtmo: { value: 1.0 }
+      },
       vertexShader: `
         varying vec3 vN; varying vec3 vW;
         void main(){ vN=normalize(normalMatrix*normal); vW=(modelMatrix*vec4(position,1.0)).xyz;
           gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
       fragmentShader: `
-        varying vec3 vN; varying vec3 vW; uniform vec3 uSun; uniform float uTime;
+        varying vec3 vN; varying vec3 vW;
+        uniform vec3 uSun, uSeed, uBase, uDark, uLight, uRim;
+        uniform float uTime, uStyle, uHydro, uEnergy, uHasAtmo;
         ${GE.glsl.noise}
         void main(){
           vec3 N=normalize(vN); vec3 V=normalize(cameraPosition-vW);
           vec3 p=normalize(vW);
-          // 程序化大陆：低频造陆 + 高频细节，与战略地块分层叠加时作星球贴图底色
-          float cont=fbm3(p*2.1+vec3(5.0,0.0,0.0),4);
-          float detail=fbm3(p*6.5+vec3(0.0,9.0,0.0),4);
-          float m=cont*0.72+detail*0.28;
-          float sea=0.52;
-          float landMask=smoothstep(sea-0.04,sea+0.03,m);
-          float elev=clamp((m-sea)/max(1.0-sea,0.001),0.0,1.0);
-          float absLat=abs(p.y);
-          float moist=fbm3(p*4.0+vec3(20.0,0.0,0.0),3);
-          // 海洋底色
-          vec3 ocean=mix(vec3(0.03,0.09,0.17),vec3(0.06,0.18,0.30),fbm3(vW*0.03,4));
-          // 陆地：沙漠 / 平原 / 森林 / 山地
-          vec3 desert=vec3(0.72,0.62,0.38);
-          vec3 plains=vec3(0.38,0.52,0.28);
-          vec3 forest=vec3(0.18,0.38,0.22);
-          vec3 hills=vec3(0.42,0.42,0.30);
-          vec3 mountain=vec3(0.48,0.50,0.54);
-          float arid=step(absLat,0.28)*step(moist,0.42);
-          vec3 land=mix(plains,forest,smoothstep(0.45,0.62,moist));
-          land=mix(land,desert,arid);
-          land=mix(land,hills,smoothstep(0.45,0.60,elev));
-          land=mix(land,mountain,smoothstep(0.62,0.82,elev));
-          // 极地冰盖
-          float ice=smoothstep(0.72,0.88,absLat);
-          land=mix(land,vec3(0.86,0.90,0.94),ice);
-          ocean=mix(ocean,vec3(0.70,0.78,0.88),smoothstep(0.82,0.95,absLat)*0.55);
-          vec3 base=mix(ocean,land,landMask);
+          vec3 d=normalize(p + uSeed*0.001);
+          float absLat=abs(d.y);
           float day=smoothstep(-0.08,0.25,dot(N,normalize(uSun)));
-          // 海洋镜面高光（陆地弱化）
           vec3 H=normalize(normalize(uSun)+V);
-          float spec=pow(max(dot(N,H),0.0),90.0)*0.55*day*(1.0-landMask*0.85);
-          vec3 col=base*(0.14+1.0*day)+vec3(1.0,0.95,0.8)*spec;
+          vec3 base;
+          float landMask=1.0;
+          float specMul=0.15;
+
+          if(uStyle < 0.5){
+            // —— 0 类地宜居：海陆 + 气候带 + 冰盖 ——
+            float cont=fbm3(d*2.1+vec3(5.0,0.0,0.0),4);
+            float detail=fbm3(d*6.5+vec3(0.0,9.0,0.0),4);
+            float m=cont*0.72+detail*0.28;
+            float sea=mix(0.62,0.42,clamp(uHydro*1.4,0.0,1.0));
+            landMask=smoothstep(sea-0.04,sea+0.03,m);
+            float elev=clamp((m-sea)/max(1.0-sea,0.001),0.0,1.0);
+            float moist=fbm3(d*4.0+vec3(20.0,0.0,0.0),3);
+            vec3 ocean=mix(vec3(0.03,0.09,0.17),vec3(0.06,0.18,0.30),fbm3(vW*0.03,4));
+            ocean=mix(ocean,uBase.rgb*0.35,0.25);
+            vec3 desert=vec3(0.72,0.62,0.38);
+            vec3 plains=vec3(0.38,0.52,0.28);
+            vec3 forest=vec3(0.18,0.38,0.22);
+            vec3 hills=vec3(0.42,0.42,0.30);
+            vec3 mountain=vec3(0.48,0.50,0.54);
+            float arid=step(absLat,0.28)*step(moist,0.42);
+            vec3 land=mix(plains,forest,smoothstep(0.45,0.62,moist));
+            land=mix(land,desert,arid);
+            land=mix(land,hills,smoothstep(0.45,0.60,elev));
+            land=mix(land,mountain,smoothstep(0.62,0.82,elev));
+            float ice=smoothstep(0.72,0.88,absLat);
+            land=mix(land,vec3(0.86,0.90,0.94),ice);
+            ocean=mix(ocean,vec3(0.70,0.78,0.88),smoothstep(0.82,0.95,absLat)*0.55);
+            base=mix(ocean,land,landMask);
+            specMul=0.55*(1.0-landMask*0.85);
+          } else if(uStyle < 1.5){
+            // —— 1 干旱岩质：琉璃荒漠 + 裂谷 + 偶见暗影盆地 ——
+            float n=fbm3(d*3.2+vec3(1.0),5);
+            float ridge=fbm3(d*8.0+vec3(4.0,0.0,2.0),4);
+            float glass=smoothstep(0.55,0.85,n);
+            float rift=smoothstep(0.72,0.9,abs(sin(d.y*18.0+ridge*4.0)));
+            float shadow=smoothstep(0.55,0.9,absLat)*smoothstep(0.4,0.7,1.0-n);
+            vec3 sand=mix(uDark.rgb,uBase.rgb,n);
+            vec3 glaze=mix(uBase.rgb*1.1,uLight.rgb,glass);
+            vec3 basalt=uDark.rgb*0.55;
+            vec3 hot=mix(vec3(0.55,0.18,0.05),vec3(0.9,0.45,0.1),fbm3(d*12.0,3));
+            base=mix(sand,glaze,glass*0.7);
+            base=mix(base,basalt,rift*0.55);
+            base=mix(base,hot,rift*smoothstep(0.5,0.9,ridge)*0.35*uEnergy);
+            base=mix(base,uDark.rgb*0.7,shadow*0.5);
+            // 极稀薄「海」：永影盆地暗色沉积
+            landMask=1.0-shadow*0.15*step(0.05,uHydro);
+            specMul=0.25*glass+0.08;
+          } else if(uStyle < 2.5){
+            // —— 2 气冷卫星：月海 + 撞击坑 + 高反照极影 ——
+            float mare=fbm3(d*2.0+vec3(2.0),4);
+            float craters=fbm3(d*14.0+vec3(0.0,3.0,0.0),5);
+            float rim=smoothstep(0.62,0.78,craters)*smoothstep(0.88,0.72,craters);
+            float pit=smoothstep(0.78,0.92,craters);
+            float highlands=smoothstep(0.45,0.7,mare);
+            vec3 mareC=mix(uDark.rgb*0.7,uBase.rgb*0.55,0.5);
+            vec3 highlandC=mix(uBase.rgb,uLight.rgb,0.45);
+            base=mix(mareC,highlandC,highlands);
+            base=mix(base,uDark.rgb*0.4,pit*0.7);
+            base=mix(base,uLight.rgb,rim*0.55);
+            // 永久阴影坑：可能含水冰
+            float psr=smoothstep(0.82,0.95,absLat)*smoothstep(0.55,0.8,1.0-mare);
+            base=mix(base,vec3(0.75,0.82,0.9),psr*0.45);
+            landMask=1.0;
+            specMul=0.08+rim*0.12;
+          } else {
+            // —— 3 寒冷矮行星：暗冰壳 + 稀疏霜纹 + 微弱灵能晕 ——
+            float n=fbm3(d*2.6+vec3(8.0),4);
+            float frost=fbm3(d*9.0,4);
+            float vein=smoothstep(0.65,0.85,abs(sin(d.x*22.0+d.z*18.0+n*3.0)));
+            vec3 rock=mix(uDark.rgb*0.5,uBase.rgb*0.45,n);
+            vec3 ice=mix(vec3(0.55,0.62,0.72),uLight.rgb,0.4);
+            base=mix(rock,ice,smoothstep(0.4,0.75,frost)*0.55);
+            base=mix(base,ice*1.15,smoothstep(0.7,0.95,absLat)*0.5);
+            // 灵能亲和：微弱紫边脉
+            base=mix(base,vec3(0.45,0.35,0.65),vein*uEnergy*0.35);
+            landMask=1.0;
+            specMul=0.2+frost*0.15;
+          }
+
+          float spec=pow(max(dot(N,H),0.0),uStyle<0.5?90.0:40.0)*specMul*day;
+          vec3 col=base*(0.12+1.05*day)+vec3(1.0,0.95,0.82)*spec;
+          // 边缘光（大气或尘埃晕）
           float fr=pow(1.0-max(dot(N,V),0.0),3.0);
-          col+=vec3(0.2,0.5,0.7)*fr*0.35;
+          col+=uRim.rgb*fr*(0.25+0.55*uHasAtmo);
           gl_FragColor=vec4(col,1.0);
         }`
     });
@@ -426,16 +585,21 @@ GE.views.planet = (function () {
     const geo = new THREE.SphereGeometry(R * 1.16, 64, 64);
     const mat = new THREE.ShaderMaterial({
       side: THREE.BackSide, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-      uniforms: { uSun: { value: sunDir } },
+      uniforms: {
+        uSun: { value: sunDir },
+        uAtmo: { value: new THREE.Color(0x6fc3ff) },
+        uStrength: { value: 1.0 }
+      },
       vertexShader: 'varying vec3 vN;varying vec3 vW;void main(){vN=normalize(normalMatrix*normal);vW=(modelMatrix*vec4(position,1.0)).xyz;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
       fragmentShader: `
-        varying vec3 vN;varying vec3 vW;uniform vec3 uSun;
+        varying vec3 vN;varying vec3 vW;uniform vec3 uSun,uAtmo;uniform float uStrength;
         void main(){
           vec3 N=normalize(vN);vec3 V=normalize(cameraPosition-vW);
           float rim=pow(max(dot(N,V),0.0),3.4);
           float day=smoothstep(-0.2,0.4,dot(normalize(vW),normalize(uSun)));
-          vec3 col=mix(vec3(0.15,0.4,0.7),vec3(0.4,0.75,0.95),day);
-          gl_FragColor=vec4(col*rim*(0.4+0.8*day),rim*0.9);
+          vec3 col=mix(uAtmo*0.45,uAtmo*1.15,day);
+          float a=rim*(0.35+0.65*day)*uStrength;
+          gl_FragColor=vec4(col*rim*(0.4+0.8*day),a*0.95);
         }`
     });
     atmo = new THREE.Mesh(geo, mat);
@@ -444,9 +608,9 @@ GE.views.planet = (function () {
     const glowGeo = new THREE.SphereGeometry(R * 1.32, 48, 48);
     const glowMat = new THREE.ShaderMaterial({
       side: THREE.BackSide, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-      uniforms: {},
+      uniforms: { uGlow: { value: new THREE.Color(0x3377aa) } },
       vertexShader: 'varying vec3 vN;void main(){vN=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
-      fragmentShader: 'varying vec3 vN;void main(){float r=pow(max(vN.z,0.0),5.0);gl_FragColor=vec4(vec3(0.2,0.5,0.75)*r*0.5,r*0.4);}'
+      fragmentShader: 'varying vec3 vN;uniform vec3 uGlow;void main(){float r=pow(max(vN.z,0.0),5.0);gl_FragColor=vec4(uGlow*r*0.55,r*0.4);}'
     });
     glow = new THREE.Mesh(glowGeo, glowMat);
     view.scene.add(glow);
@@ -457,19 +621,26 @@ GE.views.planet = (function () {
     const geo = new THREE.SphereGeometry(R * 1.025, 72, 72);
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false,
-      uniforms: { uSun: { value: sunDir }, uTime: { value: 0 } },
+      uniforms: {
+        uSun: { value: sunDir },
+        uTime: { value: 0 },
+        uAmount: { value: 0.55 },
+        uTint: { value: new THREE.Color(0xffffff) }
+      },
       vertexShader: 'varying vec3 vN;varying vec3 vW;void main(){vN=normalize(normalMatrix*normal);vW=(modelMatrix*vec4(position,1.0)).xyz;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
       fragmentShader: `
-        varying vec3 vN;varying vec3 vW;uniform vec3 uSun;uniform float uTime;
+        varying vec3 vN;varying vec3 vW;uniform vec3 uSun,uTint;uniform float uTime,uAmount;
         ${GE.glsl.noise}
         void main(){
+          if(uAmount<0.02){discard;}
           vec3 p=normalize(vW);
           float n=fbm3(p*3.4+vec3(uTime*0.02,0.0,uTime*0.008),5);
           n+=0.35*fbm3(p*8.0-vec3(uTime*0.03,0.0,0.0),4);
-          float a=smoothstep(0.52,0.78,n);
+          float thr=mix(0.72,0.48,clamp(uAmount,0.0,1.0));
+          float a=smoothstep(thr,thr+0.26,n)*uAmount;
           float day=smoothstep(-0.1,0.3,dot(normalize(vN),normalize(uSun)));
-          vec3 col=mix(vec3(0.25,0.3,0.4),vec3(1.0),day);
-          gl_FragColor=vec4(col,a*(0.16+0.6*day));
+          vec3 col=mix(uTint*0.35,uTint,day);
+          gl_FragColor=vec4(col,a*(0.14+0.55*day));
         }`
     });
     clouds = new THREE.Mesh(geo, mat);
@@ -720,7 +891,14 @@ GE.views.planet = (function () {
       case 'assets': if (assetPoints) assetPoints.visible = on; break;
       case 'orbit': if (satShell) { satShell.orbitGroup.visible = on; satShell.satMesh.visible = on; } break;
       case 'coverage': if (satShell) satShell.ringMesh.visible = on; break;
-      case 'atmo': if (atmo) atmo.visible = on; if (glow) glow.visible = on; break;
+      case 'atmo': {
+        const body = activeBody();
+        const vis = body ? resolveBodyVisual(body) : { hasAtmo: 1 };
+        const show = on && vis.hasAtmo > 0.08;
+        if (atmo) atmo.visible = show;
+        if (glow) glow.visible = show;
+        break;
+      }
     }
   };
 

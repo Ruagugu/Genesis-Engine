@@ -49,36 +49,54 @@ GE.views.universe = (function () {
     view._bg = mat;
   }
 
-  /* ============ 行星着色器（按类型） ============ */
+  /* ============ 行星着色器（按类型 + climate 细分） ============ */
   function planetMaterial(b) {
-    const styleMap = { '岩质行星': 0, '卫星': 0, '矮行星': 0, '类地行星': 1, '气态巨星': 2, '冰巨星': 3, '气态行星': 2 };
-    const style = styleMap[b.type] != null ? styleMap[b.type] : 0;
+    // 0 岩质/干旱 · 1 类地 · 2 气态 · 3 冰巨星 · 4 气冷卫星 · 5 寒冷矮行星
+    let style = 0;
+    const cp = b.climateProfile || {};
+    const temp = cp.meanTemp || '';
+    const hydro = cp.hydrosphere != null ? cp.hydrosphere : -1;
+    if (b.type === '类地行星') style = 1;
+    else if (b.type === '气态巨星' || b.type === '气态行星') style = 2;
+    else if (b.type === '冰巨星') style = 3;
+    else if (b.type === '卫星') style = 4;
+    else if (b.type === '矮行星' || temp === 'frigid') style = 5;
+    else if (b.type === '岩质行星' || temp === 'hot') style = 0;
+    else style = 0;
+
     const c = new THREE.Color(b.color);
-    const dark = c.clone().multiplyScalar(0.45);
-    const light = c.clone().lerp(new THREE.Color(0xffffff), 0.35);
-    const atmoCol = b.type === '类地行星' ? new THREE.Color(0x6fc3ff) : (b.type === '冰巨星' ? new THREE.Color(0xaee6f5) : c.clone().lerp(new THREE.Color(0xffffff), 0.5));
+    const dark = c.clone().multiplyScalar(0.42);
+    const light = c.clone().lerp(new THREE.Color(0xffffff), 0.38);
+    let atmoCol, hasAtmo = 0;
+    if (style === 1) { atmoCol = new THREE.Color(0x6fc3ff); hasAtmo = 1; }
+    else if (style === 2) { atmoCol = c.clone().lerp(new THREE.Color(0xffffff), 0.45); hasAtmo = 1; }
+    else if (style === 3) { atmoCol = new THREE.Color(0xaee6f5); hasAtmo = 1; }
+    else if (style === 0 && hydro > 0.05) { atmoCol = c.clone().lerp(new THREE.Color(0xffaa66), 0.4); hasAtmo = 0.4; }
+    else { atmoCol = c.clone().lerp(new THREE.Color(0xffffff), 0.3); hasAtmo = 0; }
+
+    const seed = (b.surfaceSeed || 0) * 0.0001;
     return new THREE.ShaderMaterial({
       uniforms: {
         uA: { value: dark }, uB: { value: c }, uC: { value: light },
-        uStyle: { value: style }, uTime: { value: 0 },
-        uAtmo: { value: atmoCol }, uHasAtmo: { value: (b.type === '类地行星' || b.type === '气态巨星' || b.type === '冰巨星' || b.type === '气态行星') ? 1 : 0 }
+        uStyle: { value: style }, uTime: { value: 0 }, uSeed: { value: seed },
+        uAtmo: { value: atmoCol }, uHasAtmo: { value: hasAtmo }
       },
       vertexShader: 'varying vec3 vN;varying vec3 vW;void main(){vN=normalize(normal);vW=(modelMatrix*vec4(position,1.0)).xyz;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
       fragmentShader: `
         varying vec3 vN;varying vec3 vW;
-        uniform vec3 uA,uB,uC,uAtmo;uniform float uStyle,uTime,uHasAtmo;
+        uniform vec3 uA,uB,uC,uAtmo;uniform float uStyle,uTime,uHasAtmo,uSeed;
         ${GE.glsl.noise}
         void main(){
           vec3 N=normalize(vN);
-          vec3 p=normalize(vW - vec3(0.0)); // 以星为心（行星球心在 modelMatrix 中）
-          // 需要局部法线方向：用几何法线近似球面方向
-          vec3 dir=normalize((vec4(N,0.0)).xyz);
+          vec3 dir=normalize(vN + vec3(uSeed,uSeed*1.3,-uSeed*0.7));
           vec3 col;
-          if(uStyle<0.5){ // 岩质/卫星/矮行星
+          if(uStyle<0.5){ // 干旱岩质
             float n=fbm3(dir*4.0+vec3(3.0),5);
             float cr=fbm3(dir*11.0,4);
-            col=mix(uA,uB,n); col=mix(col,uC,smoothstep(0.6,0.85,cr)*0.4);
-          } else if(uStyle<1.5){ // 类地行星
+            float rift=smoothstep(0.7,0.92,abs(sin(dir.y*16.0+cr*3.0)));
+            col=mix(uA,uB,n); col=mix(col,uC,smoothstep(0.6,0.85,cr)*0.45);
+            col=mix(col,uA*0.5,rift*0.4);
+          } else if(uStyle<1.5){ // 类地
             float cont=fbm3(dir*2.4+vec3(7.0),5);
             float land=smoothstep(0.5,0.56,cont);
             vec3 ocean=mix(uA*0.6,uB,0.4);
@@ -86,24 +104,35 @@ GE.views.universe = (function () {
             col=mix(ocean,landc,land);
             float ice=smoothstep(0.86,0.95,abs(dir.y)); col=mix(col,vec3(0.9,0.95,1.0),ice*0.8);
             float cl=smoothstep(0.55,0.8,fbm3(dir*3.5+vec3(uTime*0.02,0.0,0.0),4)); col=mix(col,vec3(1.0),cl*0.35);
-          } else { // 气态/冰巨星：横向条带
+          } else if(uStyle<2.5){ // 气态条带
             float bands=sin(dir.y*9.0 + fbm3(dir*3.0,4)*3.0);
             float t=fbm3(vec3(dir.x*2.0,dir.y*8.0,dir.z*2.0),4);
             col=mix(uA,uB,0.5+0.5*bands); col=mix(col,uC,t*0.4);
-            if(uStyle>2.5){ // 冰巨星更柔和
-              col=mix(uA,uB,0.6+0.3*fbm3(dir*2.5,4)); col=mix(col,uC,0.25);
-            }
+          } else if(uStyle<3.5){ // 冰巨星柔和
+            col=mix(uA,uB,0.6+0.3*fbm3(dir*2.5,4)); col=mix(col,uC,0.25);
+          } else if(uStyle<4.5){ // 气冷卫星：月海+坑
+            float mare=fbm3(dir*2.2,4);
+            float cr=fbm3(dir*12.0,5);
+            float pit=smoothstep(0.78,0.92,cr);
+            float rim=smoothstep(0.62,0.78,cr)*smoothstep(0.88,0.72,cr);
+            col=mix(uA*0.75,uB,smoothstep(0.4,0.7,mare));
+            col=mix(col,uA*0.4,pit*0.65);
+            col=mix(col,uC,rim*0.5);
+          } else { // 寒冷矮行星
+            float n=fbm3(dir*2.8,4);
+            float frost=fbm3(dir*9.0,3);
+            col=mix(uA*0.55,uB*0.6,n);
+            col=mix(col,uC,smoothstep(0.45,0.8,frost)*0.4);
+            col=mix(col,vec3(0.7,0.78,0.88),smoothstep(0.75,0.95,abs(dir.y))*0.45);
           }
-          // 恒星光照（恒星在原点）
           vec3 L=normalize(-vW);
           float diff=max(dot(N,L),0.0);
           float wrap=max(dot(N,L)*0.5+0.5,0.0);
           col*= (0.06 + 1.15*mix(diff,wrap,0.25));
-          // 大气边缘光
-          if(uHasAtmo>0.5){
+          if(uHasAtmo>0.05){
             vec3 V=normalize(cameraPosition-vW);
             float rim=pow(1.0-max(dot(N,V),0.0),3.0);
-            col+=uAtmo*rim*0.8;
+            col+=uAtmo*rim*0.75*uHasAtmo;
           }
           gl_FragColor=vec4(col,1.0);
         }`

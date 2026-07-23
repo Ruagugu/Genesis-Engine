@@ -14,7 +14,7 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
   'use strict';
   if (!surfaceDef) throw new Error('createWorldState: surfaceDef required');
   options = options || {};
-  const KEY = options.storageKey || ('genesis-engine-surface-' + (surfaceDef.id || 'default') + '-v1');
+  const KEY = options.storageKey || ('genesis-engine-surface-' + (surfaceDef.id || 'default') + '-v2');
   const map = () => surfaceDef;
   const gridApi = () => options.grid || GE.worldGrid;
 
@@ -36,22 +36,66 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
     return n - Math.floor(n);
   }
   function angle(a, b) { return Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))); }
+
+  /** biomeKind: terrestrial | arid_rock | airless_moon | cold_dwarf */
+  function biomeKind() {
+    if (map().biomeKind) return map().biomeKind;
+    const cp = map().climateProfile || {};
+    const body = (GE.data.spaceBodies || []).find(b => b.id === map().bodyId);
+    const type = body && body.type;
+    if (type === '卫星') return 'airless_moon';
+    if (type === '矮行星' || cp.meanTemp === 'frigid') return 'cold_dwarf';
+    if (type === '岩质行星' || cp.meanTemp === 'hot') return 'arid_rock';
+    return 'terrestrial';
+  }
+
   function terrainFor(grid) {
     const [x, y, z] = grid.center;
     const lat = Math.abs(grid.lat) / 90;
-    const land = 0.55 * rng(x * 7 + y * 13 + z * 17) + 0.45 * rng(x * 23 - y * 11 + z * 5);
-    // 气候配置：海洋阈值等可按 surface 覆盖
-    const hydrosphere = map().climateProfile && map().climateProfile.hydrosphere != null
-      ? map().climateProfile.hydrosphere : 0.37;
-    if (land < hydrosphere) return 'ocean';
-    if (land < hydrosphere + 0.06) return 'coast';
-    if (lat > .87) return 'ice';
-    if (lat > .72) return 'tundra';
-    if (land > .84) return 'mountain';
-    if (land > .73) return 'hills';
-    if (lat < .30 && rng(x * 31 + z * 19) < .43) return 'desert';
-    return rng(y * 41 + z * 29) > .59 ? 'forest' : 'plains';
+    const noise = 0.55 * rng(x * 7 + y * 13 + z * 17) + 0.45 * rng(x * 23 - y * 11 + z * 5);
+    const fine = rng(x * 31 + z * 19);
+    const kind = biomeKind();
+    const cp = map().climateProfile || {};
+    const hydrosphere = cp.hydrosphere != null ? cp.hydrosphere : 0.37;
+    const energy = cp.energyAffinity != null ? cp.energyAffinity : 0.3;
+
+    if (kind === 'terrestrial') {
+      if (noise < hydrosphere) return 'ocean';
+      if (noise < hydrosphere + 0.06) return 'coast';
+      if (lat > .87) return 'ice';
+      if (lat > .72) return 'tundra';
+      if (noise > .84) return 'mountain';
+      if (noise > .73) return 'hills';
+      if (lat < .30 && fine < .43) return 'desert';
+      return rng(y * 41 + z * 29) > .59 ? 'forest' : 'plains';
+    }
+
+    if (kind === 'arid_rock') {
+      // 几乎无开放水体；永影盆地算「可庇护」低地
+      if (lat > .78 && noise < 0.42) return 'shadow_basin';
+      if (noise > 0.82 || (fine > 0.85 && lat > 0.35)) return 'volcanic_ridge';
+      if (noise > 0.68 || Math.abs(Math.sin(grid.lat * 0.08 + fine * 4)) > 0.78) return 'rift';
+      if (noise < 0.38) return 'basalt';
+      return 'glass_plain';
+    }
+
+    if (kind === 'airless_moon') {
+      // 永久阴影坑（极地 + 低噪声）
+      if (lat > 0.82 && noise < 0.48) return 'psr';
+      if (fine > 0.78) return 'crater';
+      if (noise < 0.42) return 'mare';
+      if (noise > 0.72) return 'highlands';
+      return 'regolith';
+    }
+
+    // cold_dwarf
+    if (noise > 0.78 && energy > 0.02 && fine > 0.55) return 'essence_vein';
+    if (lat > 0.7) return 'dark_ice';
+    if (noise < 0.4) return 'dust_basin';
+    if (fine > 0.6) return 'frost_plain';
+    return 'dark_ice';
   }
+
   function regionFor(grid) {
     let best = null, score = Infinity;
     ensureSeeds();
@@ -63,33 +107,91 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
     });
     return best;
   }
+
   function resourceFor(tile) {
     const r = rng(tile.index * 3.31);
     const out = [];
-    const add = (resourceId, richness) => out.push({ resourceId, richness, discovered:true, exhausted:false });
-    if (tile.terrain === 'plains') { add('food', 2 + Math.floor(r * 3)); if (r > .70) add('materials', 1); }
-    if (tile.terrain === 'forest') { add('biomass', 2 + Math.floor(r * 3)); if (r > .76) add('essence', 1); }
-    if (tile.terrain === 'hills' || tile.terrain === 'mountain') { add('metals', 2 + Math.floor(r * 3)); if (r > .64) add('rareMinerals', 1 + Math.floor(r * 2)); }
-    if (tile.terrain === 'desert') { add('fuel', 1 + Math.floor(r * 3)); if (r > .72) add('essence', 1); }
-    if (tile.terrain === 'coast' || tile.terrain === 'ocean') { add('food', 1 + Math.floor(r * 2)); if (r > .77) add('fuel', 1); }
-    if (tile.terrain === 'tundra' || tile.terrain === 'ice') { if (r > .48) add('fuel', 1 + Math.floor(r * 2)); }
+    const add = (resourceId, richness) => {
+      if (!map().resourceCatalog[resourceId]) return;
+      out.push({ resourceId, richness, discovered: true, exhausted: false });
+    };
+    const t = tile.terrain;
+    const kind = biomeKind();
+
+    if (kind === 'terrestrial') {
+      if (t === 'plains') { add('food', 2 + Math.floor(r * 3)); if (r > .70) add('materials', 1); }
+      if (t === 'forest') { add('biomass', 2 + Math.floor(r * 3)); if (r > .76) add('essence', 1); }
+      if (t === 'hills' || t === 'mountain') { add('metals', 2 + Math.floor(r * 3)); if (r > .64) add('rareMinerals', 1 + Math.floor(r * 2)); }
+      if (t === 'desert') { add('fuel', 1 + Math.floor(r * 3)); if (r > .72) add('essence', 1); }
+      if (t === 'coast' || t === 'ocean') { add('food', 1 + Math.floor(r * 2)); if (r > .77) add('fuel', 1); }
+      if (t === 'tundra' || t === 'ice') { if (r > .48) add('fuel', 1 + Math.floor(r * 2)); }
+      return out;
+    }
+
+    if (kind === 'arid_rock') {
+      if (t === 'glass_plain') { add('materials', 1 + Math.floor(r * 2)); if (r > .55) add('sulfur', 1 + Math.floor(r * 2)); }
+      if (t === 'basalt') { add('metals', 2 + Math.floor(r * 2)); add('materials', 1); }
+      if (t === 'rift') { add('metals', 2 + Math.floor(r * 3)); add('rareMinerals', 1 + Math.floor(r * 2)); if (r > .5) add('sulfur', 2); }
+      if (t === 'volcanic_ridge') { add('sulfur', 2 + Math.floor(r * 3)); add('fuel', 1 + Math.floor(r * 2)); if (r > .6) add('energy', 1); }
+      if (t === 'shadow_basin') { add('materials', 1); if (r > .4) add('iceWater', 1 + Math.floor(r * 2)); if (r > .7) add('essence', 1); }
+      if (!out.length) add('materials', 1);
+      return out;
+    }
+
+    if (kind === 'airless_moon') {
+      if (t === 'mare') { add('regolithOre', 2 + Math.floor(r * 2)); if (r > .55) add('metals', 1); if (r > .72) add('helium3', 1); }
+      if (t === 'highlands') { add('regolithOre', 1 + Math.floor(r * 2)); add('materials', 1 + Math.floor(r * 2)); }
+      if (t === 'crater') { add('metals', 1 + Math.floor(r * 2)); if (r > .5) add('rareMinerals', 1); }
+      if (t === 'psr') { add('iceWater', 2 + Math.floor(r * 3)); if (r > .45) add('helium3', 1 + Math.floor(r * 2)); }
+      if (t === 'regolith') { add('regolithOre', 2 + Math.floor(r * 2)); if (r > .65) add('helium3', 1); }
+      if (!out.length) add('regolithOre', 1);
+      return out;
+    }
+
+    // cold_dwarf
+    if (t === 'frost_plain') { add('iceWater', 2 + Math.floor(r * 2)); add('materials', 1); }
+    if (t === 'dark_ice') { add('iceWater', 1 + Math.floor(r * 2)); add('metals', 1); if (r > .6) add('rareMinerals', 1); }
+    if (t === 'dust_basin') { add('regolithOre', 1 + Math.floor(r * 2)); add('fuel', 1); }
+    if (t === 'essence_vein') { add('essence', 2 + Math.floor(r * 3)); if (r > .4) add('energy', 1 + Math.floor(r * 2)); }
+    if (!out.length) add('iceWater', 1);
     return out;
   }
+
   function buildingFor(tile) {
     const r = rng(tile.index * 17.17);
     if (!tile.ownerCivId || r > .025) return [];
     const catalog = map().buildingCatalog;
-    const typeId = tile.terrain === 'plains' ? 'granary' : tile.terrain === 'forest' ? 'grove' :
-      tile.terrain === 'hills' || tile.terrain === 'mountain' ? 'forge' : tile.terrain === 'coast' || tile.terrain === 'ocean' ? 'port' : 'extractor';
-    if (!catalog[typeId]) return [];
-    return [{ id:`${typeId}-${tile.id}`, typeId, name:catalog[typeId].name, level:1 + Math.floor(rng(tile.index * 9) * 2), status:'运行中' }];
+    const t = tile.terrain;
+    const kind = biomeKind();
+    let typeId = null;
+    if (kind === 'terrestrial') {
+      typeId = t === 'plains' ? 'granary' : t === 'forest' ? 'grove' :
+        t === 'hills' || t === 'mountain' ? 'forge' : t === 'coast' || t === 'ocean' ? 'port' : 'extractor';
+    } else if (kind === 'arid_rock') {
+      typeId = t === 'rift' || t === 'basalt' ? 'drill' : t === 'volcanic_ridge' ? 'extractor' :
+        t === 'shadow_basin' ? 'icePlant' : 'solarArray';
+    } else if (kind === 'airless_moon') {
+      typeId = t === 'psr' ? 'icePlant' : t === 'mare' || t === 'regolith' ? 'solarArray' : 'drill';
+    } else {
+      typeId = t === 'essence_vein' ? 'essenceTap' : t === 'frost_plain' || t === 'dark_ice' ? 'icePlant' : 'drill';
+    }
+    if (!typeId || !catalog[typeId]) return [];
+    return [{ id: `${typeId}-${tile.id}`, typeId, name: catalog[typeId].name, level: 1 + Math.floor(rng(tile.index * 9) * 2), status: '运行中' }];
   }
+
+  function isWaterTerrain(terrain) {
+    return terrain === 'ocean' || terrain === 'coast';
+  }
+
   function initialOwner(grid, terrain) {
-    const water = terrain === 'ocean' || terrain === 'coast';
+    // 无人殖民表面：无 capitalSeeds → 全无主
+    const claims = map().claimRadius || {};
+    const seeds = map().capitalSeeds || {};
+    if (!Object.keys(seeds).length) return null;
+    const water = isWaterTerrain(terrain);
     let found = null, score = Infinity;
     ensureSeeds();
-    const claims = map().claimRadius || {};
-    Object.entries(map().capitalSeeds || {}).forEach(([civId]) => {
+    Object.entries(seeds).forEach(([civId]) => {
       const cap = capitalSeeds[civId];
       if (!cap) return;
       const d = angle(grid.center, cap.center) * 180 / Math.PI;
@@ -99,15 +201,30 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
     });
     return found;
   }
+
+  function statusFor(terrain, ownerCivId) {
+    if (ownerCivId) return '已开发';
+    if (isWaterTerrain(terrain)) return '深海';
+    if (terrain === 'psr') return '永夜未勘';
+    if (terrain === 'shadow_basin') return '永影未勘';
+    if (terrain === 'glass_plain' || terrain === 'rift') return '炙热荒原';
+    if (terrain === 'mare' || terrain === 'regolith' || terrain === 'highlands') return '真空表面';
+    if (terrain === 'frost_plain' || terrain === 'dark_ice' || terrain === 'dust_basin') return '寒寂';
+    if (terrain === 'essence_vein') return '灵脉外露';
+    return '未开发';
+  }
+
   function templateWarehouse(civ) {
     const base = 420 + civ.stats.经济 * 9;
     const stock = {}, capacity = {}, produced = {}, consumed = {}, net = {};
-    Object.keys(map().resourceCatalog).forEach((id, index) => {
-      capacity[id] = Math.round(base * (index === 0 ? 2 : 1));
-      stock[id] = Math.round(capacity[id] * (.36 + rng(civ.stats.人口 * (index + 3)) * .35));
+    // 仅初始化本表面会出现的资源键（+ 通用）
+    const keys = Object.keys(map().resourceCatalog);
+    keys.forEach((id, index) => {
+      capacity[id] = Math.round(base * (index === 0 ? 2 : 1) * (biomeKind() === 'terrestrial' ? 1 : 0.45));
+      stock[id] = Math.round(capacity[id] * (.2 + rng(civ.stats.人口 * (index + 3)) * .25));
       produced[id] = 0; consumed[id] = 0; net[id] = 0;
     });
-    return { capacity, stock, lastTurn:{ produced, consumed, net }, reservePolicy:{ food:.35, fuel:.25, energy:.30 } };
+    return { capacity, stock, lastTurn: { produced, consumed, net }, reservePolicy: { food: .35, fuel: .25, energy: .30, iceWater: .4 } };
   }
   function build() {
     if (built) return api;
@@ -117,12 +234,12 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
       const terrain = terrainFor(grid);
       const region = regionFor(grid);
       const ownerCivId = initialOwner(grid, terrain);
-      const terrainMeta = map().terrainCatalog[terrain] || { elevation: '低地' };
+      const terrainMeta = map().terrainCatalog[terrain] || { elevation: '低地', name: terrain };
       const tile = {
         ...grid, terrain, elevationBand: terrainMeta.elevation,
         regionId: region ? region.id : (map().regions[0] && map().regions[0].id),
-        ownerCivId, status:ownerCivId ? '已开发' : terrain === 'ocean' ? '深海' : '未开发',
-        resources:[], buildings:[], output:{}
+        ownerCivId, status: statusFor(terrain, ownerCivId),
+        resources: [], buildings: [], output: {}
       };
       tile.resources = resourceFor(tile);
       tile.buildings = buildingFor(tile);
@@ -182,6 +299,7 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
   }
   function advanceTurn() {
     build();
+    const kind = biomeKind();
     Object.keys(warehouses).forEach(civId => {
       const c = GE.data.civs.find(x => x.id === civId);
       if (!c) return;
@@ -189,11 +307,22 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
       const produced = {}, consumed = {}, net = {};
       Object.keys(map().resourceCatalog).forEach(id => {
         const production = summary.output[id] || 0;
-        const use = id === 'food' ? Math.max(1, Math.round(c.stats.人口 / 65)) : id === 'energy' ? Math.max(1, Math.round(c.level * 5 + c.stats.科研 / 18)) : id === 'fuel' ? Math.round(c.stats.军力 / 24) : 0;
-        // 非母星表面：消耗按本星存在度打折（MVP：有领地才按 15% 人口当量）
-        const scale = surfaceDef.bodyId === 'gaiya' ? 1 : Math.min(1, Math.max(0.05, tilesOwnedRatio(civId)));
+        // 非宜居体：无粮食人口消耗，改为能源/水冰维持
+        let use = 0;
+        if (kind === 'terrestrial') {
+          use = id === 'food' ? Math.max(1, Math.round(c.stats.人口 / 65))
+            : id === 'energy' ? Math.max(1, Math.round(c.level * 5 + c.stats.科研 / 18))
+            : id === 'fuel' ? Math.round(c.stats.军力 / 24) : 0;
+        } else {
+          use = id === 'energy' ? Math.max(1, Math.round(2 + c.level * 2))
+            : id === 'iceWater' ? Math.max(0, Math.round(1 + summary.tiles.length / 80))
+            : id === 'fuel' ? Math.round(c.stats.军力 / 40) : 0;
+        }
+        const scale = map().bodyId === 'gaiya' ? 1 : Math.min(1, Math.max(0.05, tilesOwnedRatio(civId)));
         const useScaled = Math.round(use * scale);
         produced[id] = production; consumed[id] = useScaled; net[id] = production - useScaled;
+        if (warehouse.stock[id] == null) warehouse.stock[id] = 0;
+        if (warehouse.capacity[id] == null) warehouse.capacity[id] = 200;
         warehouse.stock[id] = Math.max(0, Math.min(warehouse.capacity[id], warehouse.stock[id] + net[id]));
       });
       warehouse.lastTurn = { produced, consumed, net };

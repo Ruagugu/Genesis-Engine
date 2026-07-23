@@ -87,3 +87,47 @@ test('switching back to home restores its state facade', async ({ page }) => {
     stationLabel: true
   });
 });
+
+test('tile biomes match body type (no earth terrain on moon/rock)', async ({ page }) => {
+  const report = await page.evaluate(() => {
+    function sample(bodyId) {
+      GE.surfaces.activate(bodyId);
+      const tiles = GE.worldState.tiles;
+      return {
+        biomeKind: GE.worldState.def.biomeKind,
+        earthTerrain: tiles.some(t => ['ocean', 'forest', 'plains', 'coast'].includes(t.terrain)),
+        hasFood: tiles.some(t => t.resources.some(r => r.resourceId === 'food')),
+        hasIce: tiles.some(t => t.resources.some(r => r.resourceId === 'iceWater')),
+        hasGlass: tiles.some(t => t.terrain === 'glass_plain' || t.terrain === 'rift'),
+        hasMare: tiles.some(t => t.terrain === 'mare' || t.terrain === 'psr'),
+        hasFrost: tiles.some(t => t.terrain === 'frost_plain' || t.terrain === 'dark_ice' || t.terrain === 'essence_vein')
+      };
+    }
+    return {
+      gaiya: sample('gaiya'),
+      yinhui: sample('yinhui'),
+      yanhe: sample('yanhe'),
+      youxing: sample('youxing')
+    };
+  });
+
+  expect(report.gaiya.biomeKind).toBe('terrestrial');
+  expect(report.gaiya.earthTerrain).toBe(true);
+  expect(report.gaiya.hasFood).toBe(true);
+
+  expect(report.yinhui.biomeKind).toBe('airless_moon');
+  expect(report.yinhui.earthTerrain).toBe(false);
+  expect(report.yinhui.hasFood).toBe(false);
+  expect(report.yinhui.hasMare).toBe(true);
+  expect(report.yinhui.hasIce).toBe(true);
+
+  expect(report.yanhe.biomeKind).toBe('arid_rock');
+  expect(report.yanhe.earthTerrain).toBe(false);
+  expect(report.yanhe.hasFood).toBe(false);
+  expect(report.yanhe.hasGlass).toBe(true);
+
+  expect(report.youxing.biomeKind).toBe('cold_dwarf');
+  expect(report.youxing.earthTerrain).toBe(false);
+  expect(report.youxing.hasFood).toBe(false);
+  expect(report.youxing.hasFrost).toBe(true);
+});

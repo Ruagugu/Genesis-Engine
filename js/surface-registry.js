@@ -64,7 +64,7 @@ GE.surfaces = (function () {
     else if (body.surfaceSeed != null) topology.seed = body.surfaceSeed;
 
     const grid = GE.createWorldGrid(topology);
-    const storageKey = 'genesis-engine-surface-' + surfaceId.replace(/[:/]/g, '-') + '-v1';
+    const storageKey = 'genesis-engine-surface-' + surfaceId.replace(/[:/]/g, '-') + '-v2';
     const state = GE.createWorldState(Object.assign({}, def, { id: surfaceId, bodyId }), {
       storageKey,
       grid
@@ -114,7 +114,7 @@ GE.surfaces = (function () {
   function migrateLegacyStorage() {
     try {
       const legacy = localStorage.getItem('genesis-engine-strategic-map-v1');
-      const gaiyaKey = 'genesis-engine-surface-gaiya-surface-v1';
+      const gaiyaKey = 'genesis-engine-surface-gaiya-surface-v2';
       if (legacy && !localStorage.getItem(gaiyaKey)) {
         localStorage.setItem(gaiyaKey, legacy);
       }
