@@ -187,7 +187,7 @@ GE.app = (function () {
    * @param {string} bodyId
    * @param {{ silent?: boolean, unloadPrevious?: boolean }} opts
    */
-  function enterPlanet(bodyId, opts) {
+  async function enterPlanet(bodyId, opts) {
     opts = opts || {};
     const body = (GE.data.spaceBodies || []).find(b => b.id === bodyId);
     if (!body) {
@@ -199,6 +199,10 @@ GE.app = (function () {
       return;
     }
     try {
+      // C5：缺 surface def 时远程 ensure / 本地合成
+      if (GE.surfaces && GE.surfaces.ensureRemote) {
+        await GE.surfaces.ensureRemote(bodyId, { force: !!opts.forceEnsure });
+      }
       if (state.initialized.planet && GE.views.planet.loadSurface) {
         GE.views.planet.loadSurface(bodyId, { silent: opts.silent, unloadPrevious: opts.unloadPrevious });
       } else if (GE.surfaces) {
@@ -339,8 +343,9 @@ GE.app = (function () {
     labelHost.style.display = visible ? '' : 'none';
     labelHost.querySelectorAll('.map-label').forEach(el => {
       const id = el.dataset.label || '';
-      const belongs = state.view === 'planet' ? (id.startsWith('cap-') || id.startsWith('region-') || id === 'station') :
-                      state.view === 'universe' ? id.startsWith('u-') : false;
+      const belongs = state.view === 'planet'
+        ? (id.startsWith('cap-') || id.startsWith('region-') || id.startsWith('fac-') || id === 'station')
+        : state.view === 'universe' ? id.startsWith('u-') : false;
       el.style.visibility = belongs ? 'visible' : 'hidden';
     });
   }
@@ -578,18 +583,150 @@ GE.app = (function () {
 
   function hideHoverCard() { hoverCard.hidden = true; }
 
-  /* ============ 前端推演演示 ============ */
-  function runDeduction(opts) {
+  /* ============ 真推演（阶段 C · 默认服务端 rules_only） ============ */
+  function mockDeductionEnabled() {
+    try {
+      const q = new URLSearchParams(location.search || '');
+      if (q.get('mockDeduce') === '1' || q.get('mock') === 'deduce') return true;
+      if (window.GE_MOCK_DEDUCE === true) return true;
+      if (localStorage.getItem('ge-mock-deduce') === '1') return true;
+    } catch (_) { /* ignore */ }
+    return false;
+  }
+
+  function runId() {
+    try {
+      if (GE.llmConfig && typeof GE.llmConfig.runId === 'function') {
+        const r = GE.llmConfig.runId();
+        if (r) return r;
+      }
+      const q = new URLSearchParams(location.search || '');
+      return q.get('run') || (GE.snapshot && GE.snapshot.last && GE.snapshot.last.runId) || 'local-seed';
+    } catch (_) {
+      return 'local-seed';
+    }
+  }
+
+  function apiRoot() {
+    if (GE.llmConfig && typeof GE.llmConfig.worldBase === 'function') {
+      const w = GE.llmConfig.worldBase();
+      if (w) return w;
+    }
+    if (GE.snapshot && typeof GE.snapshot.apiBase === 'function') {
+      const b = GE.snapshot.apiBase();
+      if (b) return b;
+    }
+    return '';
+  }
+
+  function applyWorldDelta(delta) {
+    if (!delta) return;
+    GE.data.spaceBodies = GE.data.spaceBodies || [];
+    const byId = new Map(GE.data.spaceBodies.map(b => [b.id, b]));
+    (delta.newBodies || []).forEach(b => {
+      if (!byId.has(b.id)) {
+        GE.data.spaceBodies.push(b);
+        byId.set(b.id, b);
+      }
+    });
+    (delta.updatedBodies || []).forEach(b => {
+      const i = GE.data.spaceBodies.findIndex(x => x.id === b.id);
+      if (i >= 0) GE.data.spaceBodies[i] = b;
+      else GE.data.spaceBodies.push(b);
+    });
+    (delta.removedBodyIds || []).forEach(id => {
+      const i = GE.data.spaceBodies.findIndex(x => x.id === id);
+      if (i >= 0) GE.data.spaceBodies.splice(i, 1);
+    });
+    // 宇宙视图热更新
+    const uv = GE.views && GE.views.universe;
+    if (uv && state.initialized.universe && typeof uv.reloadBodies === 'function') {
+      try { uv.reloadBodies(); } catch (err) { console.warn('[创世引擎] universe reloadBodies', err); }
+    }
+  }
+
+  function applyDeduceResult(result, opts) {
+    opts = opts || {};
+    state.deductionRound = (result.round && result.round.n) || (state.deductionRound + 1);
+    state.simulatedYear = result.year != null ? result.year : state.simulatedYear;
+    GE.data.world.年数 = state.simulatedYear;
+    if (result.revision != null) {
+      state.revision = result.revision;
+      if (GE.snapshot && GE.snapshot.last) GE.snapshot.last.revision = result.revision;
+    }
+    const yearEl = document.getElementById('ws-year-num');
+    if (yearEl) yearEl.textContent = GE.fmt.num(state.simulatedYear);
+
+    const log = {
+      round: state.deductionRound,
+      year: `${(GE.data.world.纪元 && GE.data.world.纪元.纪年) || '第4纪元'} · ${state.simulatedYear}年`,
+      summary: (result.chronicle && result.chronicle[0] && result.chronicle[0].事件)
+        || (result.decisions && result.decisions[0] && result.decisions[0].decision)
+        || '推演已收敛',
+      lenses: result.lenses || {},
+      decisions: result.decisions || [],
+      worldDelta: result.worldDelta || null
+    };
+    GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
+    GE.data.deduction.log.unshift(log);
+    if (result.decisions) {
+      GE.data.deduction.pendingDecisions = result.decisions.map(d => ({
+        civ: d.civId,
+        leader: d.characterName,
+        characterId: d.characterId,
+        decision: d.decision,
+        urgency: d.urgency,
+        stance: d.stance,
+        kind: d.kind
+      }));
+    }
+    if (result.chronicle && result.chronicle.length) {
+      GE.data.chronicle = GE.data.chronicle || [];
+      result.chronicle.forEach(entry => {
+        // 服务端已 unshift 过；前端按事件文本去重
+        if (!GE.data.chronicle.some(c => c.事件 === entry.事件 && c.年份 === entry.年份)) {
+          GE.data.chronicle.unshift(entry);
+        }
+      });
+    }
+
+    applyWorldDelta(result.worldDelta);
+
+    if (!opts.edict) {
+      if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
+      else if (GE.worldState && GE.worldState.advanceTurn) GE.worldState.advanceTurn();
+      // 服务端已改 civ 科技；若响应未带回 civs，前端用 patches 轻量回写
+      try {
+        const techPatches = result.patchesSummary && result.patchesSummary.tech;
+        if (Array.isArray(techPatches)) {
+          techPatches.forEach(p => {
+            const civ = (GE.data.civs || []).find(c => c.id === p.civId);
+            if (!civ || !civ.科技树 || !civ.科技树.节点 || !civ.科技树.节点[p.node]) return;
+            civ.科技树.节点[p.node].进度 = p.progress;
+          });
+        }
+      } catch (_) { /* ignore */ }
+      const dawn = GE.data.civs && GE.data.civs[0];
+      if (dawn && dawn.科技树) {
+        const cardBar = document.querySelector('#civ-card-dawn .civ-lvbar i');
+        const cardNum = document.querySelector('#civ-card-dawn .civ-lvnum');
+        if (cardBar) cardBar.style.width = dawn.科技树.下一阶段 + '%';
+        if (cardNum) cardNum.textContent = dawn.科技树.下一阶段 + '%';
+      }
+    }
+
+    return log;
+  }
+
+  function runMockDeduction(opts) {
     opts = opts || {};
     state.deductionRound += 1;
     state.simulatedYear += opts.edict ? 1 : 7;
     GE.data.world.年数 = state.simulatedYear;
     document.getElementById('ws-year-num').textContent = GE.fmt.num(state.simulatedYear);
-
     const result = opts.edict
-      ? `神谕「${opts.edict}」开始生效。各文明 Agent 已进入连锁反应评估，世界状态将在下一轮收敛。`
-      : '五个文明的决策完成四轮交叉推演：晨曦联邦批准受限点火，奥瑞利安加速发射台，希尔瓦娜使者已抵达熔心堡，深渊祭祀继续下潜。';
-
+      ? `神谕「${opts.edict}」开始生效（本地 Mock）。`
+      : '（Mock）五文明决策完成交叉推演。';
     const log = {
       round: state.deductionRound,
       year: `${GE.data.world.纪元.纪年} · ${state.simulatedYear}年`,
@@ -604,22 +741,59 @@ GE.app = (function () {
       }
     };
     GE.data.deduction.log.unshift(log);
-
     if (!opts.edict) {
       if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
       else GE.worldState.advanceTurn();
-      const tech = GE.data.civs[0].科技树.节点['亚光速引擎'];
-      tech.进度 = Math.min(100, tech.进度 + 7);
-      GE.data.civs[0].科技树.下一阶段 = Math.min(100, GE.data.civs[0].科技树.下一阶段 + 3);
-      const cardBar = document.querySelector('#civ-card-dawn .civ-lvbar i');
-      const cardNum = document.querySelector('#civ-card-dawn .civ-lvnum');
-      if (cardBar) cardBar.style.width = GE.data.civs[0].科技树.下一阶段 + '%';
-      if (cardNum) cardNum.textContent = GE.data.civs[0].科技树.下一阶段 + '%';
+    }
+    return log;
+  }
+
+  async function runDeduction(opts) {
+    opts = opts || {};
+    let log;
+    if (mockDeductionEnabled()) {
+      log = runMockDeduction(opts);
+    } else {
+      const rid = runId();
+      const url = `${apiRoot()}/api/v1/runs/${encodeURIComponent(rid)}/deduce`;
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            force: !!opts.force,
+            edict: opts.edict || null
+          }),
+          cache: 'no-store'
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`deduce ${res.status}${text ? ': ' + text.slice(0, 160) : ''}`);
+        }
+        const result = await res.json();
+        log = applyDeduceResult(result, opts);
+      } catch (err) {
+        console.error('[创世引擎] 推演失败', err);
+        GE.toast.show({
+          type: 'warn',
+          icon: 'info',
+          title: '推演请求失败',
+          msg: String(err && err.message || err) + ' · 可加 ?mockDeduce=1 使用本地调试'
+        });
+        return null;
+      }
     }
 
     GE.modal.close();
-    GE.toast.show({ type: 'success', icon: 'checkC', title: `第 ${state.deductionRound} 轮推演已收敛`, msg: result });
-    setTimeout(() => GE.toast.show({ type: 'warn', icon: 'history', title: '世界变量已改写', msg: `世界推进至 ${state.simulatedYear} 年。新因果已载入大事记，暗线继续积累。` }), 650);
+    const msg = log && log.summary ? log.summary : '推演已收敛';
+    GE.toast.show({ type: 'success', icon: 'checkC', title: `第 ${state.deductionRound} 轮推演已收敛`, msg });
+    setTimeout(() => GE.toast.show({
+      type: 'warn',
+      icon: 'history',
+      title: '世界变量已改写',
+      msg: `世界推进至 ${state.simulatedYear} 年。新因果已载入大事记。`
+    }), 650);
+    return log;
   }
 
   /* ============ 设置 ============ */

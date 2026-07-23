@@ -21,11 +21,34 @@ GE.views.planet = (function () {
   let terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints, hoverHex;
   let faceTileIds = [];
   let satShell = null, station = null, ships = [];
+  let planetFacilities = [];    // [{ id, body, group, alt, inc, a, speed, mesh }]
   let raycaster, pointer, downPos;
   let selected = null;          // 当前选中 {type, civId/obj}
   let time = 0;
   let currentBodyId = null;
   let pointerBound = false;
+
+  /** 宇宙半长轴 a → 星球视图轨道高度（相对 R） */
+  function universeAToPlanetAlt(a, body) {
+    const br = Math.max(1, (body && body.radius) || 8);
+    // a/br ≈ 1 贴地表；常见近轨 1.4～4；钳制在球外可见带
+    const ratio = Math.max(1.12, Math.min(4.2, a / br));
+    return R * ratio;
+  }
+
+  /** 是否算「近轨」、应在本星球视图显示 */
+  function isNearOrbitFacility(fac, bodyId) {
+    if (!fac || fac.parent !== bodyId) return false;
+    if (!(fac.flags && fac.flags.artificial) && !(fac.visual && fac.visual.class)) {
+      if (!['空间站', '轨道设施', '星门', '采矿站', '轨道农场', '防御平台'].includes(fac.type)) return false;
+    }
+    const a = fac.orbit && fac.orbit.a;
+    if (a == null) return false;
+    const body = (GE.data.spaceBodies || []).find(b => b.id === bodyId);
+    const br = Math.max(1, (body && body.radius) || 8);
+    // 超过约 5 倍行星半径的壳层视为远轨/星际，星球视图不画
+    return a / br <= 5.0;
+  }
 
   function activeSurfaceDef() {
     return (GE.worldState && GE.worldState.def) || GE.data.strategicMap;
@@ -175,10 +198,21 @@ GE.views.planet = (function () {
       if (satShell.shellGlow && satShell.shellGlow.parent) satShell.shellGlow.parent.remove(satShell.shellGlow);
       satShell = null;
     }
-    if (station && station.group) {
-      if (station.group.parent) station.group.parent.remove(station.group);
-      station = null;
-    }
+    planetFacilities.forEach(f => {
+      if (f.group && f.group.parent) f.group.parent.remove(f.group);
+      if (f.orbitLine && f.orbitLine.parent) f.orbitLine.parent.remove(f.orbitLine);
+      if (f.group) {
+        f.group.traverse(ch => {
+          if (ch.geometry) ch.geometry.dispose();
+          if (ch.material) {
+            if (Array.isArray(ch.material)) ch.material.forEach(m => m.dispose && m.dispose());
+            else if (ch.material.dispose) ch.material.dispose();
+          }
+        });
+      }
+    });
+    planetFacilities = [];
+    station = null;
     ships.forEach(s => { if (s.mesh && s.mesh.parent) s.mesh.parent.remove(s.mesh); });
     ships = [];
   }
@@ -190,10 +224,134 @@ GE.views.planet = (function () {
   }
 
   function buildOrbitalsForBody(bodyId) {
-    // 星链 / 望舒仅在盖亚有叙事意义；其他天体暂不显示
-    if (bodyId === 'gaiya') {
-      buildSatelliteShell();
-      buildStationAndShips();
+    buildNearOrbitFacilities(bodyId);
+    // 星链壳：有 constellation 近轨设施或盖亚联邦叙事时显示
+    const hasConstellation = planetFacilities.some(f => f.cls === 'constellation');
+    if (bodyId === 'gaiya' || hasConstellation) {
+      buildSatelliteShell(bodyId);
+    }
+    // 舰船仅在「主站」存在时往返（兼容旧 HUD）
+    if (station) buildShipsForStation();
+  }
+
+  function buildNearOrbitFacilities(bodyId) {
+    planetFacilities = [];
+    station = null;
+    // 与宇宙图共用程序化分壳（幂等）；保证 parent/a 已排布
+    if (GE.facilityLayout && GE.data && Array.isArray(GE.data.spaceBodies)) {
+      GE.facilityLayout.apply(GE.data.spaceBodies, {
+        seed: (GE.data.world && GE.data.world.seed) || 20260723
+      });
+    }
+    const body = (GE.data.spaceBodies || []).find(b => b.id === bodyId);
+    const list = (GE.data.spaceBodies || []).filter(b => isNearOrbitFacility(b, bodyId));
+    // 内壳优先显示顺序；星座不占独立大 mesh（用星链壳表达）
+    list.sort((a, b) => {
+      const aa = (a.orbit && a.orbit.a) || 0;
+      const bb = (b.orbit && b.orbit.a) || 0;
+      return aa - bb;
+    });
+
+    list.forEach((fac, idx) => {
+      const cls = (GE.facilityMesh && GE.facilityMesh.resolveClass)
+        ? GE.facilityMesh.resolveClass(fac)
+        : ((fac.visual && fac.visual.class) || 'generic');
+
+      // 星座：由星链壳 + 标签表达，不重复画一坨环
+      if (cls === 'constellation') {
+        planetFacilities.push({
+          id: fac.id, body: fac, cls, group: null, alt: 0, inc: 0, a: 0, speed: 0,
+          isConstellation: true
+        });
+        return;
+      }
+
+      let group;
+      if (GE.facilityMesh && GE.facilityMesh.create) {
+        group = GE.facilityMesh.create(fac);
+        // 宇宙图 mesh 偏小，星球视图放大到可读
+        const scale = cls === 'habitat' || cls === 'drydock_ring' ? 3.2
+          : cls === 'ark' ? 2.4
+          : cls === 'tether' ? 2.8
+          : 2.6;
+        group.scale.setScalar(scale);
+      } else {
+        group = new THREE.Group();
+        const core = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.6, 1.6, 7, 12),
+          new THREE.MeshStandardMaterial({ color: 0xb8c4d8, metalness: 0.8, roughness: 0.35, emissive: 0x223040 })
+        );
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(4.4, 0.5, 10, 40),
+          new THREE.MeshStandardMaterial({ color: 0x8fa4c0, metalness: 0.85, roughness: 0.3, emissive: 0x1a2a3a })
+        );
+        ring.rotation.x = Math.PI / 2;
+        group.add(core, ring);
+      }
+      group.name = 'facility:' + fac.id;
+      group.userData.bodyId = fac.id;
+      group.userData.facilityId = fac.id;
+
+      const o = fac.orbit || {};
+      const alt = universeAToPlanetAlt(o.a || 16, body);
+      const inc = ((o.inc != null ? o.inc : 12) * D2R);
+      const phase = o.phase != null ? o.phase : (idx * 0.9);
+      const speed = 0.12 / Math.pow(Math.max(alt / R, 1.1), 1.4);
+
+      // 淡色轨道线（同倾角圆）
+      const pts = [];
+      for (let i = 0; i <= 96; i++) {
+        pts.push(orbitPos(alt, inc, (i / 96) * Math.PI * 2, new THREE.Vector3()));
+      }
+      const orbitLine = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({
+          color: fac.color || 0x5fd6e6,
+          transparent: true,
+          opacity: 0.18,
+          blending: THREE.AdditiveBlending
+        })
+      );
+
+      const entry = {
+        id: fac.id,
+        body: fac,
+        cls,
+        group,
+        orbitLine,
+        alt,
+        inc,
+        a: phase,
+        speed,
+        isConstellation: false
+      };
+      if (GE.facilityMesh && GE.facilityMesh.makeUpdater) {
+        entry.update = GE.facilityMesh.makeUpdater({ mesh: group });
+      }
+      planetFacilities.push(entry);
+      view.scene.add(group, orbitLine);
+
+      // 兼容旧逻辑：第一个模块站/空间站当作 station 主锚点
+      if (!station && (cls === 'station_modular' || fac.type === '空间站' || fac.id === 'wangshu')) {
+        station = entry;
+      }
+    });
+
+    // 无模块站时仍可用第一个实体设施作舰船锚点
+    if (!station) {
+      station = planetFacilities.find(f => f.group) || null;
+    }
+  }
+
+  function buildShipsForStation() {
+    ships = [];
+    for (let i = 0; i < 3; i++) {
+      const ship = new THREE.Mesh(
+        new THREE.ConeGeometry(0.7, 2.4, 6),
+        new THREE.MeshBasicMaterial({ color: 0xffd9a0 })
+      );
+      view.scene.add(ship);
+      ships.push({ mesh: ship, t: i / 3, speed: 0.05 + i * 0.012 });
     }
   }
 
@@ -671,9 +829,12 @@ GE.views.planet = (function () {
   }
 
   /* ============ 星链卫星壳 ============ */
-  function buildSatelliteShell() {
+  function buildSatelliteShell(bodyId) {
     const civ = GE.data.civs.find(c => c.id === 'dawn');
-    const N = civ ? civ.orbital.satellites : 96;
+    // 非盖亚：有 constellation 时用较少节点示意
+    const N = bodyId === 'gaiya'
+      ? (civ && civ.orbital && civ.orbital.satellites ? civ.orbital.satellites : 96)
+      : 36;
     // 三个轨道壳层（不同高度/倾角）
     const shells = [
       { alt: 1.16, inc: 53 * D2R, count: Math.floor(N * 0.5), phase: 0 },
@@ -734,33 +895,6 @@ GE.views.planet = (function () {
     return out.set(x, y, z);
   }
 
-  /* ============ 轨道站与舰船 ============ */
-  function buildStationAndShips() {
-    // 望舒轨道站
-    const g = new THREE.Group();
-    const core = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 7, 12), new THREE.MeshStandardMaterial({ color: 0xb8c4d8, metalness: 0.8, roughness: 0.35, emissive: 0x223040 }));
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(4.4, 0.5, 10, 40), new THREE.MeshStandardMaterial({ color: 0x8fa4c0, metalness: 0.85, roughness: 0.3, emissive: 0x1a2a3a }));
-    ring.rotation.x = Math.PI / 2;
-    const panelGeo = new THREE.BoxGeometry(9, 0.1, 2.2);
-    const panelMat = new THREE.MeshStandardMaterial({ color: 0x2a4a7a, metalness: 0.6, roughness: 0.4, emissive: 0x0a1a3a });
-    const p1 = new THREE.Mesh(panelGeo, panelMat); p1.position.x = 6;
-    const p2 = new THREE.Mesh(panelGeo, panelMat); p2.position.x = -6;
-    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.6, 8, 8), new THREE.MeshBasicMaterial({ color: 0x9decf6 }));
-    beacon.position.y = 4;
-    g.add(core, ring, p1, p2, beacon);
-    station = { group: g, alt: R * 1.42, inc: 28 * D2R, a: 0.8, speed: 0.16, beacon };
-    view.scene.add(g);
-
-    // 舰船（往返轨迹）
-    ships = [];
-    for (let i = 0; i < 3; i++) {
-      const ship = new THREE.Mesh(new THREE.ConeGeometry(0.7, 2.4, 6), new THREE.MeshBasicMaterial({ color: 0xffd9a0 }));
-      const glowP = new THREE.PointLight(0x6fe0f0, 0, 60);
-      view.scene.add(ship);
-      ships.push({ mesh: ship, t: i / 3, speed: 0.05 + i * 0.012 });
-    }
-  }
-
   /* ============ 悬停标记 ============ */
   function buildHoverMarker() {
     const geo = new THREE.RingGeometry(4.4, 5.4, 6);
@@ -792,12 +926,48 @@ GE.views.planet = (function () {
         { className:'planet clickable', occlude:true, occludeThreshold:.08, fadeFar:[300, 520], onClick:() => GE.panels.openRegion(region.id) });
       view._labelIds.push(id);
     });
-    if (station) {
-      labels.add('station', (v) => station ? v.copy(station.group.position) : v.set(0, 0, 0),
-        `<div class="ml-inner"><div class="ml-name">望舒轨道站</div><div class="ml-sub">晨曦联邦 · 前哨</div></div>`,
-        { className: '', occlude: false, fadeFar: [560, 700], onClick: () => GE.panels.openStation() });
-      view._labelIds.push('station');
+    planetFacilities.forEach(f => {
+      if (f.isConstellation || !f.group) return;
+      const fac = f.body;
+      // 望舒保留 id=station，兼容旧 QA / 滤镜
+      const id = (fac.id === 'wangshu') ? 'station' : ('fac-' + fac.id);
+      const sub = fac.subtype || fac.type || '轨道设施';
+      labels.add(id, (v) => {
+        if (f.group) return v.copy(f.group.position);
+        return v.set(0, 0, 0);
+      },
+        `<div class="ml-inner"><div class="ml-name">${fac.name}</div><div class="ml-sub">${sub}</div></div>`,
+        {
+          className: '',
+          occlude: false,
+          fadeFar: [480, 680],
+          onClick: () => openFacilityPanel(fac)
+        });
+      view._labelIds.push(id);
+    });
+    // 星座：挂一枚逻辑标签在星链壳高度
+    const cons = planetFacilities.find(f => f.isConstellation);
+    if (cons && cons.body) {
+      const id = 'fac-' + cons.body.id;
+      labels.add(id, (v) => v.set(R * 1.18, R * 0.15, 0),
+        `<div class="ml-inner"><div class="ml-name">${cons.body.name}</div><div class="ml-sub">${cons.body.subtype || '星座'}</div></div>`,
+        { className: '', occlude: false, fadeFar: [520, 700], onClick: () => openFacilityPanel(cons.body) });
+      view._labelIds.push(id);
     }
+  }
+
+  function openFacilityPanel(fac) {
+    if (!fac) return;
+    // 望舒保持原站面板；其余优先天体卡片
+    if (fac.id === 'wangshu' && GE.panels && GE.panels.openStation) {
+      GE.panels.openStation();
+      return;
+    }
+    if (GE.app && GE.app.showBodyCard) {
+      GE.app.showBodyCard(fac, null);
+      return;
+    }
+    if (GE.panels && GE.panels.openStation) GE.panels.openStation();
   }
 
   /* ============ 指针交互 ============ */
@@ -844,15 +1014,22 @@ GE.views.planet = (function () {
     }
     return null;
   }
-  function pickStation(e) {
-    if (!station) return false;
+  function pickFacility(e) {
+    const meshes = planetFacilities.filter(f => f.group).map(f => f.group);
+    if (!meshes.length) return null;
     setPointer(e);
     raycaster.setFromCamera(pointer, view.camera);
-    return raycaster.intersectObject(station.group, true).length > 0;
+    const hits = raycaster.intersectObjects(meshes, true);
+    if (!hits.length) return null;
+    let o = hits[0].object;
+    while (o && !o.userData.facilityId) o = o.parent;
+    if (!o || !o.userData.facilityId) return null;
+    return planetFacilities.find(f => f.id === o.userData.facilityId) || null;
   }
 
   function handleClick(e) {
-    if (pickStation(e)) { GE.panels.openStation(); return; }
+    const facHit = pickFacility(e);
+    if (facHit) { openFacilityPanel(facHit.body); return; }
     const hex = pickHex(e);
     if (hex) {
       selectHex(hex);
@@ -912,7 +1089,14 @@ GE.views.planet = (function () {
       case 'regions': if (regionMesh) regionMesh.visible = on; if (regionBorders) regionBorders.visible = on; break;
       case 'ownership': if (ownershipMesh) ownershipMesh.visible = on; if (politicalBorders) politicalBorders.visible = on; break;
       case 'assets': if (assetPoints) assetPoints.visible = on; break;
-      case 'orbit': if (satShell) { satShell.orbitGroup.visible = on; satShell.satMesh.visible = on; } break;
+      case 'orbit':
+        if (satShell) { satShell.orbitGroup.visible = on; satShell.satMesh.visible = on; }
+        planetFacilities.forEach(f => {
+          if (f.group) f.group.visible = on;
+          if (f.orbitLine) f.orbitLine.visible = on;
+        });
+        ships.forEach(s => { if (s.mesh) s.mesh.visible = on; });
+        break;
       case 'coverage': if (satShell) satShell.ringMesh.visible = on; break;
       case 'atmo': {
         const body = activeBody();
@@ -962,21 +1146,23 @@ GE.views.planet = (function () {
       satShell.shellGlow.rotation.y += dt * 0.01;
     }
 
-    // 轨道站
-    if (station) {
-      station.a += dt * station.speed;
-      orbitPos(station.alt, station.inc, station.a, station.group.position);
-      station.group.rotation.z += dt * 0.2;
-      station.group.lookAt(0, 0, 0);
-      station.beacon.material.color.setHSL(0.52, 0.9, 0.6 + 0.3 * Math.sin(elapsed * 3));
-    }
+    // 近轨设施
+    planetFacilities.forEach(f => {
+      if (!f.group) return;
+      f.a += dt * f.speed;
+      orbitPos(f.alt, f.inc, f.a, f.group.position);
+      f.group.lookAt(0, 0, 0);
+      if (f.update) f.update(elapsed);
+    });
 
-    // 舰船（站 ↔ 深空往返）
+    // 舰船（主站 ↔ 深空往返）
     ships.forEach((s, i) => {
       s.t += dt * s.speed;
       const tt = s.t % 2;
-      const k = tt < 1 ? tt : 2 - tt; // 往返
-      const from = station ? station.group.position : new THREE.Vector3(R * 1.4, 0, 0);
+      const k = tt < 1 ? tt : 2 - tt;
+      const from = (station && station.group)
+        ? station.group.position
+        : new THREE.Vector3(R * 1.4, 0, 0);
       const to = new THREE.Vector3(Math.cos(i * 2.1) * R * 2.6, R * 0.6 * (i - 1), Math.sin(i * 2.1) * R * 2.6);
       s.mesh.position.lerpVectors(from, to, k);
       s.mesh.lookAt(to);

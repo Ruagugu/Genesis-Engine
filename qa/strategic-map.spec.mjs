@@ -4,7 +4,9 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.waitForSelector('#boot.done');
+  await page.waitForFunction(() => window.GE && GE.app && GE.app.state && GE.app.state.started, null, {
+    timeout: 30000
+  });
 });
 
 test('strategic grid topology and tile data are complete', async ({ page }) => {
@@ -47,8 +49,8 @@ test('strategic layer controls are independent', async ({ page }) => {
 });
 
 test('merged warehouse marks a current surface without a warehouse', async ({ page }) => {
-  await page.evaluate(() => {
-    GE.app.enterPlanet('yinhui', { silent: true });
+  await page.evaluate(async () => {
+    await GE.app.enterPlanet('yinhui', { silent: true });
     GE.panels.openWarehouse('dawn');
   });
   await expect(page.locator('.warehouse-scope')).toContainText('帝国总仓');

@@ -183,7 +183,9 @@ GE.Labels = class {
   update(camera, w, h, center) {
     const camPos = camera.position;
     this.items.forEach((it) => {
-      const p = it.getPos(this._v); // 复用向量
+      // getPos 约定：写入 out 并返回同一 Vector3；若未返回则回退复用向量
+      let p = it.getPos(this._v);
+      if (!p || typeof p.x !== 'number') p = this._v;
       // 投影
       const v = this._v.copy(p).project(camera);
       const behind = v.z > 1;

@@ -4,7 +4,9 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/');
   await page.evaluate(() => localStorage.clear());
   await page.reload();
-  await page.waitForSelector('#boot.done');
+  await page.waitForFunction(() => window.GE && GE.app && GE.app.state && GE.app.state.started, null, {
+    timeout: 30000
+  });
 });
 
 test('landable bodies expose independent surfaces', async ({ page }) => {
@@ -61,11 +63,11 @@ test('universe body card can enter a non-home landable body', async ({ page }) =
 });
 
 test('switching back to home restores its state facade', async ({ page }) => {
-  const report = await page.evaluate(() => {
-    GE.app.enterPlanet('yinhui', { silent: true });
+  const report = await page.evaluate(async () => {
+    await GE.app.enterPlanet('yinhui', { silent: true });
     const moonState = GE.worldState.active;
     const moonKey = moonState.storageKey;
-    GE.app.enterPlanet('gaiya', { silent: true });
+    await GE.app.enterPlanet('gaiya', { silent: true });
     return {
       bodyId: GE.app.state.activeBodyId,
       surfaceId: GE.worldState.surfaceId,
@@ -89,18 +91,18 @@ test('switching back to home restores its state facade', async ({ page }) => {
 });
 
 test('optional switch unload evicts aliases and rebuilds persisted state', async ({ page }) => {
-  const report = await page.evaluate(() => {
+  const report = await page.evaluate(async () => {
     const home = GE.surfaces.get('gaiya');
     const sample = home.state.tiles[123];
     home.state.advanceTurn();
     const revision = home.state.revision;
     const stock = home.state.getWarehouse('dawn').stock.food;
 
-    GE.app.enterPlanet('yinhui', { silent: true, unloadPrevious: true });
+    await GE.app.enterPlanet('yinhui', { silent: true, unloadPrevious: true });
     const evicted = !GE.surfaces.get('gaiya') && !GE.surfaces.get('gaiya:surface');
     const moonActive = GE.worldState.bodyId === 'yinhui' && GE.worldGrid.active === GE.surfaces.get('yinhui').grid;
 
-    GE.app.enterPlanet('gaiya', { silent: true, unloadPrevious: true });
+    await GE.app.enterPlanet('gaiya', { silent: true, unloadPrevious: true });
     const rebuilt = GE.surfaces.get('gaiya');
     const sameSample = rebuilt.state.getTile(sample.id);
     return {

@@ -141,6 +141,12 @@ GE.views.universe = (function () {
 
   /* ============ 构建天体 ============ */
   function buildBodies() {
+    // 人造设施：程序化分壳 / 相位，避免挤在同一轨道
+    if (GE.facilityLayout && GE.data && Array.isArray(GE.data.spaceBodies)) {
+      GE.facilityLayout.apply(GE.data.spaceBodies, {
+        seed: (GE.data.world && GE.data.world.seed) || 20260723
+      });
+    }
     GE.data.spaceBodies.forEach(b => {
       if (b.type === '小行星带') { bodies[b.id] = { data: b, pos: new THREE.Vector3() }; return; }
       const entry = { data: b, pos: new THREE.Vector3() };
@@ -192,7 +198,15 @@ GE.views.universe = (function () {
         view.scene.add(grp);
         entry.update = (t, days) => { ring.rotation.z = days * 0.08; };
       }
+      else if (GE.facilityMesh && GE.facilityMesh.isFacility(b)) {
+        entry.mesh = GE.facilityMesh.create(b);
+        entry.isFacility = true;
+        entry.isStation = true;
+        entry.update = GE.facilityMesh.makeUpdater(entry);
+        view.scene.add(entry.mesh);
+      }
       else if (b.type === '空间站') {
+        // 无 facility-mesh 时的回落
         const grp = new THREE.Group();
         const core = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 3.4, 8), new THREE.MeshStandardMaterial({ color: 0xb8c4d8, metalness: 0.8, roughness: 0.3, emissive: 0x1a2a3a }));
         const ringS = new THREE.Mesh(new THREE.TorusGeometry(2, 0.28, 8, 24), new THREE.MeshStandardMaterial({ color: 0x8fa4c0, metalness: 0.8, roughness: 0.3 }));
@@ -229,20 +243,28 @@ GE.views.universe = (function () {
         entry.update = (t, days) => { mat.uniforms.uTime.value = t; entry.mesh.rotation.y = days * 0.008 / Math.max(1, b.radius * 0.2); };
       }
 
-      // 轨道线（母星 / landable 高亮）
-      if (b.orbit && b.type !== '卫星' && b.type !== '空间站') {
+      // 轨道线（母星 / landable 高亮；人造设施默认不画，星座/星门除外）
+      const isFac = entry.isFacility || (GE.facilityMesh && GE.facilityMesh.isFacility(b));
+      const facClass = isFac && GE.facilityMesh ? GE.facilityMesh.resolveClass(b) : null;
+      const drawFacOrbit = facClass === 'constellation' || facClass === 'gate' || facClass === 'stellar_infra';
+      if (b.orbit && b.type !== '卫星' && b.type !== '空间站' && (!isFac || drawFacOrbit)) {
         const homeish = GE.surfaces ? GE.surfaces.isPlayerHome(b) : !!b.home;
         const landable = GE.surfaces ? GE.surfaces.isLandable(b) : !!b.home;
-        const col = b.type === '黑洞' ? 0x8b7cf6 : (homeish ? 0x5fd6e6 : landable ? 0x6fd08c : 0x4a5a7a);
-        const op = homeish ? 0.5 : landable ? 0.35 : 0.22;
+        let col = b.type === '黑洞' ? 0x8b7cf6 : (homeish ? 0x5fd6e6 : landable ? 0x6fd08c : 0x4a5a7a);
+        let op = homeish ? 0.5 : landable ? 0.35 : 0.22;
+        if (drawFacOrbit) {
+          col = facClass === 'gate' ? 0xa080ff : facClass === 'stellar_infra' ? 0xffd9a0 : 0x5fd6e6;
+          op = 0.28;
+        }
         entry.orbitLine = makeOrbitLine(b, col, op);
         view.scene.add(entry.orbitLine);
       }
-      // 标签
+      // 标签（仅中文名；设施用更近淡出，减挤叠）
       if (b.type !== '恒星') {
         labels.add('u-' + b.id, (v) => v.copy(entry.pos),
           `<div class="ml-inner"><div class="ml-name">${b.name}</div><div class="ml-tick"></div></div>`,
-          { className: 'planet', fadeFar: b.type === '黑洞' ? [2600, 3400] : [1400, 2400],
+          { className: isFac ? 'planet fac' : 'planet',
+            fadeFar: b.type === '黑洞' ? [2600, 3400] : isFac ? [700, 1400] : [1400, 2400],
             onClick: () => focusBody(b.id) });
       } else {
         labels.add('u-' + b.id, (v) => v.copy(entry.pos),
@@ -443,6 +465,39 @@ GE.views.universe = (function () {
   view.activate = function () { view._tagMeshes(); };
   view.deactivate = function () { downPos = null; view._focus = null; };
   view.dispose = function () {};
+
+  /** 推演后增量刷新：按 GE.data.spaceBodies 重建天体网格与标签 */
+  view.reloadBodies = function () {
+    if (!view._built || !view.scene) return;
+    Object.keys(bodies).forEach(id => {
+      const entry = bodies[id];
+      if (entry && entry.mesh) {
+        view.scene.remove(entry.mesh);
+        entry.mesh.traverse && entry.mesh.traverse(obj => {
+          if (obj.geometry) obj.geometry.dispose && obj.geometry.dispose();
+          if (obj.material) {
+            if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose && m.dispose());
+            else obj.material.dispose && obj.material.dispose();
+          }
+        });
+      }
+      if (entry && entry.orbitLine) {
+        view.scene.remove(entry.orbitLine);
+        if (entry.orbitLine.geometry) entry.orbitLine.geometry.dispose();
+        if (entry.orbitLine.material) entry.orbitLine.material.dispose();
+      }
+      if (labels) labels.remove('u-' + id);
+    });
+    bodies = {};
+    if (habitable) {
+      view.scene.remove(habitable);
+      if (habitable.geometry) habitable.geometry.dispose();
+      if (habitable.material) habitable.material.dispose();
+      habitable = null;
+    }
+    buildBodies();
+    view._tagMeshes && view._tagMeshes();
+  };
 
   return view;
 })();

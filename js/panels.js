@@ -742,13 +742,17 @@ GE.panels = (function () {
   }
 
   /* ============================================================
-     设置
+     设置（渲染 + 模型 / 世界 API）
      ============================================================ */
   function openSettings() {
     const s = GE.app.settings;
+    const llm = (GE.llmConfig && GE.llmConfig.get()) || {};
+    const modelOptions = (llm.models || []).map(m =>
+      `<option value="${esc(m)}" ${m === llm.model ? 'selected' : ''}>${esc(m)}</option>`
+    ).join('');
     GE.modal.open({
-      id: 'settings', title: '设置', subtitle: '渲染与表现',
-      icon: 'gear', accent: '#8fd0e8', size: 'md',
+      id: 'settings', title: '设置', subtitle: '渲染 · 世界 API · 模型接口',
+      icon: 'gear', accent: '#8fd0e8', size: 'lg',
       body: `
         ${secHead('layers', '渲染质量')}
         ${meterRow('内部分辨率', Math.round(s.quality * 100), '#5fd6e6')}
@@ -760,7 +764,54 @@ GE.panels = (function () {
         ${toggleRow('autoRotate', '星图自转', s.autoRotate)}
         ${toggleRow('cityLights', '城市夜光', s.cityLights)}
         ${toggleRow('reduced', '减弱动效', s.reduced)}
-        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 创世引擎 · 前端原型 v0.1 · 数据为推演演示所用。</div>`,
+
+        ${secHead('network', '世界 API（创世引擎后端）')}
+        <div class="panel" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+          <label class="kv"><span class="k">API 根地址</span>
+            <input id="set-world-api" class="input mono" style="flex:1;min-width:0" placeholder="空=同源，如 http://127.0.0.1:8123" value="${esc(llm.worldApiBase || '')}" />
+          </label>
+          <label class="kv"><span class="k">Run ID</span>
+            <input id="set-run-id" class="input mono" style="flex:1;min-width:0" value="${esc(llm.runId || 'local-seed')}" />
+          </label>
+          <div style="font-size:11px;color:var(--tx-2)">推演与 surface/ensure 将请求该地址。修改后立即写入本地。</div>
+        </div>
+
+        ${secHead('brain', '大模型接口（OpenAI 兼容）')}
+        <div class="panel" style="display:flex;flex-direction:column;gap:8px">
+          <div class="kv"><span class="k">启用 LLM</span>
+            <label class="switch"><input type="checkbox" id="set-llm-enabled" ${llm.enabled ? 'checked' : ''}><span class="switch-ui"></span></label>
+          </div>
+          <label class="kv"><span class="k">推演模式</span>
+            <select id="set-agent-mode" class="input" style="flex:1">
+              <option value="rules_only" ${llm.agentMode === 'rules_only' ? 'selected' : ''}>rules_only · 仅规则（默认）</option>
+              <option value="hybrid" ${llm.agentMode === 'hybrid' ? 'selected' : ''}>hybrid · 规则 + LLM 补全</option>
+              <option value="full" ${llm.agentMode === 'full' ? 'selected' : ''}>full · 全量 Agent（预留）</option>
+            </select>
+          </label>
+          <label class="kv"><span class="k">Base URL</span>
+            <input id="set-llm-base" class="input mono" style="flex:1;min-width:0" placeholder="https://api.openai.com/v1" value="${esc(llm.baseUrl || '')}" />
+          </label>
+          <label class="kv"><span class="k">API Key</span>
+            <input id="set-llm-key" class="input mono" type="password" style="flex:1;min-width:0" placeholder="sk-…" value="${esc(llm.apiKey || '')}" autocomplete="off" />
+          </label>
+          <label class="kv"><span class="k">Model</span>
+            <div style="flex:1;display:flex;gap:6px;min-width:0">
+              <input id="set-llm-model" class="input mono" list="set-llm-model-list" style="flex:1;min-width:0" placeholder="拉取后选择或手填" value="${esc(llm.model || '')}" />
+              <datalist id="set-llm-model-list">${modelOptions}</datalist>
+            </div>
+          </label>
+          <label class="kv"><span class="k">Temperature</span>
+            <input id="set-llm-temp" class="input mono" type="number" min="0" max="2" step="0.1" style="width:88px" value="${llm.temperature != null ? llm.temperature : 0.7}" />
+          </label>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">
+            <button class="btn btn-cyan" id="btn-llm-fetch">${ic('network', 14)}拉取模型列表</button>
+            <button class="btn" id="btn-llm-test">${ic('sparkle', 14)}试调用</button>
+            <button class="btn" id="btn-llm-save">${ic('checkC', 14)}保存</button>
+            <button class="btn" id="btn-llm-clear">清空密钥</button>
+          </div>
+          <div id="llm-status" class="mono" style="font-size:11.5px;color:var(--tx-2);min-height:1.4em;margin-top:4px"></div>
+        </div>
+        <div class="panel" style="margin-top:16px;font-size:11.5px;color:var(--tx-2)">${ic('info', 13)} 密钥仅存本机 localStorage（ge-llm-config-v1），不会上传到创世引擎服务器。hybrid 推演插口见阶段 C6。</div>`,
       onOpen: (body) => {
         body.querySelectorAll('[data-q]').forEach(b => b.addEventListener('click', () => {
           GE.app.setQuality(b.dataset.q); GE.modal.close(); openSettings();
@@ -768,6 +819,90 @@ GE.panels = (function () {
         body.querySelectorAll('[data-toggle]').forEach(t => t.addEventListener('change', () => {
           GE.app.setSetting(t.dataset.toggle, t.checked);
         }));
+
+        const status = body.querySelector('#llm-status');
+        function setStatus(msg, ok) {
+          if (!status) return;
+          status.textContent = msg || '';
+          status.style.color = ok === true ? 'var(--cyan, #5fd6e6)' : ok === false ? 'var(--red, #e56b6b)' : 'var(--tx-2)';
+        }
+        function readForm() {
+          return {
+            enabled: !!body.querySelector('#set-llm-enabled')?.checked,
+            agentMode: body.querySelector('#set-agent-mode')?.value || 'rules_only',
+            baseUrl: body.querySelector('#set-llm-base')?.value?.trim() || '',
+            apiKey: body.querySelector('#set-llm-key')?.value || '',
+            model: body.querySelector('#set-llm-model')?.value?.trim() || '',
+            temperature: Number(body.querySelector('#set-llm-temp')?.value) || 0.7,
+            worldApiBase: body.querySelector('#set-world-api')?.value?.trim() || '',
+            runId: body.querySelector('#set-run-id')?.value?.trim() || 'local-seed'
+          };
+        }
+        function saveCfg(partial) {
+          if (!GE.llmConfig) {
+            setStatus('llm-config 模块未加载', false);
+            return null;
+          }
+          return GE.llmConfig.set(Object.assign(readForm(), partial || {}));
+        }
+
+        body.querySelector('#btn-llm-save')?.addEventListener('click', () => {
+          saveCfg();
+          setStatus('已保存到本机', true);
+          GE.toast.success('设置已保存', '模型与世界 API 配置已写入本地。');
+        });
+        body.querySelector('#btn-llm-clear')?.addEventListener('click', () => {
+          if (body.querySelector('#set-llm-key')) body.querySelector('#set-llm-key').value = '';
+          saveCfg({ apiKey: '' });
+          setStatus('API Key 已清空', true);
+        });
+        body.querySelector('#btn-llm-fetch')?.addEventListener('click', async () => {
+          if (!GE.llmConfig) return;
+          saveCfg();
+          setStatus('正在拉取 /models …');
+          const btn = body.querySelector('#btn-llm-fetch');
+          if (btn) btn.disabled = true;
+          try {
+            const r = await GE.llmConfig.listModels();
+            if (!r.ok) {
+              setStatus(r.error || '拉取失败', false);
+              GE.toast.warn('拉取失败', r.error || '');
+              return;
+            }
+            const list = body.querySelector('#set-llm-model-list');
+            if (list) {
+              list.innerHTML = r.models.map(m => `<option value="${esc(m)}"></option>`).join('');
+            }
+            if (r.models[0] && body.querySelector('#set-llm-model') && !body.querySelector('#set-llm-model').value) {
+              body.querySelector('#set-llm-model').value = r.models[0];
+            }
+            setStatus(`已拉取 ${r.models.length} 个模型`, true);
+            GE.toast.success('模型列表已更新', `共 ${r.models.length} 个`);
+          } finally {
+            if (btn) btn.disabled = false;
+          }
+        });
+        body.querySelector('#btn-llm-test')?.addEventListener('click', async () => {
+          if (!GE.llmConfig) return;
+          saveCfg();
+          setStatus('试调用中 …');
+          const r = await GE.llmConfig.chat(
+            [{ role: 'user', content: '用一句话确认你已连通创世引擎。' }],
+            { force: true }
+          );
+          if (!r.ok) {
+            setStatus(r.error || '调用失败', false);
+            GE.toast.warn('试调用失败', r.error || '');
+            return;
+          }
+          setStatus('OK · ' + String(r.content || '').slice(0, 80), true);
+          GE.toast.success('模型已连通', String(r.content || '').slice(0, 120));
+        });
+
+        // 改动世界 API / 启用开关时即时落盘
+        ['#set-world-api', '#set-run-id', '#set-llm-enabled', '#set-agent-mode'].forEach(sel => {
+          body.querySelector(sel)?.addEventListener('change', () => saveCfg());
+        });
       }
     });
   }
@@ -879,14 +1014,22 @@ GE.panels = (function () {
         lenses.forEach((l, k) => setTimeout(() => l.classList.add('run'), k * 130));
       }
       i++;
-      setTimeout(nextStage, seq[i - 1] === 1 ? 1400 : 850);
+      // 真推演在服务端；流水线动画略缩短
+      setTimeout(nextStage, seq[i - 1] === 1 ? 900 : 420);
     }
     nextStage();
   }
 
-  function finish(root, btn) {
-    btn.disabled = false; btn.innerHTML = `${ic('ff', 14)}推进一轮推演`;
-    GE.app.runDeduction();   // 交由 app 真正推进世界
+  async function finish(root, btn) {
+    try {
+      await GE.app.runDeduction();   // 服务端 rules_only 真推演
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = `${ic('ff', 14)}推进一轮推演`;
+      // 控制台仍开着时刷新展示
+      const still = document.getElementById('deduce-root');
+      if (still) renderDeduction(still);
+    }
   }
 
   /* ============ 导出 ============ */

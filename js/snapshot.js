@@ -56,6 +56,7 @@ GE.snapshot = (function () {
       radius: body.radius,
       radiusVisual: body.radius,
       orbit: clone(body.orbit),
+      parent: body.parent || body.parentBodyId || null,
       parentBodyId: body.parent || body.parentBodyId || null,
       ring: !!body.ring,
       desc: body.desc || '',
@@ -64,6 +65,7 @@ GE.snapshot = (function () {
         isPlayerHome: !!(body.home || body.isPlayerHome),
         surveyed: 'none'
       }),
+      visual: clone(body.visual || null),
       surfaceId: body.surfaceId || null,
       surfaceSeed: body.surfaceSeed != null ? body.surfaceSeed : null,
       climateProfile: clone(body.climateProfile || null),
@@ -137,7 +139,9 @@ GE.snapshot = (function () {
       notes: {
         tiles: 'not-included',
         warehouses: 'client-local-or-surfaceStates',
-        writeOps: 'none'
+        // 阶段 C：写路径仅 POST /runs/:id/deduce；本地 build 仍标 none
+        writeOps: options.writeOps || 'none',
+        phase: options.phase || 'B'
       }
     };
   }
@@ -229,7 +233,13 @@ GE.snapshot = (function () {
   function apiBase() {
     try {
       const q = new URLSearchParams(location.search || '');
-      const base = q.get('api') || window.GE_API_BASE || '';
+      let base = q.get('api') || window.GE_API_BASE || '';
+      if (!base) {
+        try { base = localStorage.getItem('ge-api-base') || ''; } catch (_) { /* ignore */ }
+      }
+      if (!base && GE.llmConfig && typeof GE.llmConfig.worldBase === 'function') {
+        base = GE.llmConfig.worldBase() || '';
+      }
       return String(base).replace(/\/$/, '');
     } catch (_) {
       return '';

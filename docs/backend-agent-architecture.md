@@ -595,7 +595,8 @@ interface Run {
 
 1. CharacterAgent + Lens + Resolver。  
 2. `POST deduce` 替换 `runDeduction`。  
-3. WorldBuilder 接入探测类 action。
+3. WorldBuilder 接入探测类 action。  
+4. **产品细则（无限宇宙 · 设施上图 · rules_only 优先）**：见 `docs/phase-c-deduce-universe.md`。
 
 ### 阶段 D — 多人 · 时钟 · 神谕 · 持久化增强
 

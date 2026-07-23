@@ -1,7 +1,7 @@
 import { test, expect } from 'playwright/test';
 
 test.describe('Phase B read-only snapshot API', () => {
-  test('health reports phase B read-only', async ({ request }) => {
+  test('health reports phase C with deduce write path', async ({ request }) => {
     const res = await request.get('/api/v1/health');
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
@@ -9,8 +9,9 @@ test.describe('Phase B read-only snapshot API', () => {
       ok: true,
       apiVersion: 'v1',
       schemaVersion: 1,
-      phase: 'B',
-      writeOps: false
+      phase: 'C',
+      writeOps: true,
+      agentMode: 'rules_only'
     }));
   });
 
@@ -52,7 +53,9 @@ test.describe('Phase B read-only snapshot API', () => {
     }));
     expect(snap.bodySurfaces['gaiya:surface'].tiles).toBeUndefined();
     expect(snap.notes.tiles).toBe('not-included');
-    expect(snap.notes.writeOps).toBe('none');
+    // 阶段 C：snapshot 来自 Run，writeOps 标明 deduce
+    expect(snap.notes.writeOps).toMatch(/deduce|none/);
+    expect(snap.revision).toEqual(expect.any(Number));
 
     expect(Object.keys(snap.catalogs.resource)).toHaveLength(12);
     expect(Object.keys(snap.catalogs.terrain).length).toBeGreaterThan(10);
@@ -83,7 +86,7 @@ test.describe('Phase B read-only snapshot API', () => {
     expect(missing.status()).toBe(404);
   });
 
-  test('write methods are rejected', async ({ request }) => {
+  test('non-whitelist write methods are rejected', async ({ request }) => {
     const res = await request.post('/api/v1/snapshot', { data: { x: 1 } });
     expect(res.status()).toBe(405);
     const body = await res.json();
@@ -122,9 +125,13 @@ test.describe('Snapshot providers in browser', () => {
     expect(report.resourceKeys).toBe(12);
   });
 
-  test('http provider applies snapshot and keeps UI playable', async ({ page }) => {
+  test('http provider applies snapshot and keeps UI playable', async ({ page, request }) => {
+    // 重置默认 run，避免并行 deduce 污染年数 / bodies
+    await request.post('/api/v1/runs/local-seed/reset');
     await page.goto('/?data=http');
-    await page.waitForSelector('#boot.done');
+    await page.waitForFunction(() => window.GE && GE.app && GE.app.state && GE.app.state.started, null, {
+      timeout: 30000
+    });
 
     const report = await page.evaluate(() => {
       const snap = GE.snapshot.last;
@@ -132,6 +139,7 @@ test.describe('Snapshot providers in browser', () => {
       return {
         mode: GE.snapshot.mode,
         runId: snap.runId,
+        yearNum: snap.clock && snap.clock.year,
         civCount: GE.data.civs.length,
         gaiyaSurface: !!GE.data.bodySurfaces['gaiya:surface'],
         yinhuiBiome: GE.data.bodySurfaces['yinhui:surface'].biomeKind,
@@ -149,7 +157,8 @@ test.describe('Snapshot providers in browser', () => {
     expect(report.gaiyaSurface).toBe(true);
     expect(report.yinhuiBiome).toBe('airless_moon');
     expect(report.hud).toBe('盖亚');
-    expect(report.year).toMatch(/1[,.]?247|1247/);
+    expect(report.yearNum).toBe(1247);
+    expect(report.year.replace(/[,\s]/g, '')).toMatch(/1247/);
     expect(report.dock).toBeGreaterThanOrEqual(5);
     expect(report.empireKeys).toBe(12);
     expect(report.finite).toBe(true);
