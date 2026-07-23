@@ -88,6 +88,65 @@ test('switching back to home restores its state facade', async ({ page }) => {
   });
 });
 
+test('optional switch unload evicts aliases and rebuilds persisted state', async ({ page }) => {
+  const report = await page.evaluate(() => {
+    const home = GE.surfaces.get('gaiya');
+    const sample = home.state.tiles[123];
+    home.state.advanceTurn();
+    const revision = home.state.revision;
+    const stock = home.state.getWarehouse('dawn').stock.food;
+
+    GE.app.enterPlanet('yinhui', { silent: true, unloadPrevious: true });
+    const evicted = !GE.surfaces.get('gaiya') && !GE.surfaces.get('gaiya:surface');
+    const moonActive = GE.worldState.bodyId === 'yinhui' && GE.worldGrid.active === GE.surfaces.get('yinhui').grid;
+
+    GE.app.enterPlanet('gaiya', { silent: true, unloadPrevious: true });
+    const rebuilt = GE.surfaces.get('gaiya');
+    const sameSample = rebuilt.state.getTile(sample.id);
+    return {
+      evicted,
+      moonActive,
+      moonEvicted: !GE.surfaces.get('yinhui') && !GE.surfaces.get('yinhui:surface'),
+      homeActive: GE.worldState.active === rebuilt.state && GE.worldGrid.active === rebuilt.grid,
+      revision: rebuilt.state.revision,
+      stock: rebuilt.state.getWarehouse('dawn').stock.food,
+      deterministic: sameSample.terrain === sample.terrain && sameSample.regionId === sample.regionId &&
+        JSON.stringify(sameSample.resources) === JSON.stringify(sample.resources)
+    };
+  });
+
+  expect(report).toEqual(expect.objectContaining({
+    evicted: true,
+    moonActive: true,
+    moonEvicted: true,
+    homeActive: true,
+    deterministic: true
+  }));
+  expect(report.revision).toBe(1);
+  expect(report.stock).toBeGreaterThanOrEqual(0);
+});
+
+test('empire turn advances established surfaces only and preserves active facade', async ({ page }) => {
+  const report = await page.evaluate(() => {
+    const active = GE.surfaces.getActive();
+    const before = active.state.revision;
+    const revisions = GE.surfaces.advanceAllSurfaceTurns();
+    return {
+      bodyId: GE.surfaces.activeBodyId,
+      sameState: GE.worldState.active === active.state,
+      revisions,
+      homeRevision: active.state.revision,
+      moonWarehouse: GE.surfaces.ensure('yinhui').state.getWarehouse('dawn')
+    };
+  });
+
+  expect(report.bodyId).toBe('gaiya');
+  expect(report.sameState).toBe(true);
+  expect(report.revisions).toEqual([{ bodyId: 'gaiya', surfaceId: 'gaiya:surface', revision: 1 }]);
+  expect(report.homeRevision).toBe(1);
+  expect(report.moonWarehouse).toBeNull();
+});
+
 test('tile biomes match body type (no earth terrain on moon/rock)', async ({ page }) => {
   const report = await page.evaluate(() => {
     function sample(bodyId) {

@@ -226,6 +226,28 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
     });
     return { capacity, stock, lastTurn: { produced, consumed, net }, reservePolicy: { food: .35, fuel: .25, energy: .30, iceWater: .4 } };
   }
+  function normalizeWarehouse(civ, warehouse) {
+    const base = 420 + civ.stats.经济 * 9;
+    const defaults = { food: .35, fuel: .25, energy: .30, iceWater: .4 };
+    warehouse = warehouse || {};
+    warehouse.capacity = warehouse.capacity || {};
+    warehouse.stock = warehouse.stock || {};
+    warehouse.lastTurn = warehouse.lastTurn || {};
+    warehouse.lastTurn.produced = warehouse.lastTurn.produced || {};
+    warehouse.lastTurn.consumed = warehouse.lastTurn.consumed || {};
+    warehouse.lastTurn.net = warehouse.lastTurn.net || {};
+    warehouse.reservePolicy = Object.assign({}, defaults, warehouse.reservePolicy || {});
+    Object.keys(map().resourceCatalog).forEach((id, index) => {
+      if (!Number.isFinite(warehouse.capacity[id])) {
+        warehouse.capacity[id] = Math.round(base * (index === 0 ? 2 : 1) * (biomeKind() === 'terrestrial' ? 1 : 0.45));
+      }
+      if (!Number.isFinite(warehouse.stock[id])) warehouse.stock[id] = 0;
+      if (!Number.isFinite(warehouse.lastTurn.produced[id])) warehouse.lastTurn.produced[id] = 0;
+      if (!Number.isFinite(warehouse.lastTurn.consumed[id])) warehouse.lastTurn.consumed[id] = 0;
+      if (!Number.isFinite(warehouse.lastTurn.net[id])) warehouse.lastTurn.net[id] = 0;
+    });
+    return warehouse;
+  }
   function build() {
     if (built) return api;
     const g = gridApi();
@@ -248,18 +270,27 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
     // 仅对在本表面有 capital 的文明建仓；其余文明不建行星仓（帝国总仓后置）
     const presentCivIds = new Set(Object.keys(map().capitalSeeds || {}));
     GE.data.civs.forEach(c => {
-      if (presentCivIds.size === 0 || presentCivIds.has(c.id)) {
+      if (presentCivIds.has(c.id)) {
         warehouses[c.id] = templateWarehouse(c);
       }
     });
-    // 若有领地但无 capital 配置（纯勘察星），仍给有地块的文明建仓
-    resolved.forEach(t => {
-      if (t.ownerCivId && !warehouses[t.ownerCivId]) {
-        const civ = GE.data.civs.find(c => c.id === t.ownerCivId);
-        if (civ) warehouses[t.ownerCivId] = templateWarehouse(civ);
-      }
-    });
     hydrate();
+    // 只有首都或实际领地才能支撑行星仓；同时清理旧版本写入空表面的幽灵仓
+    const establishedCivIds = new Set(presentCivIds);
+    resolved.forEach(t => { if (t.ownerCivId) establishedCivIds.add(t.ownerCivId); });
+    Object.keys(warehouses).forEach(civId => {
+      if (!establishedCivIds.has(civId)) delete warehouses[civId];
+    });
+    establishedCivIds.forEach(civId => {
+      if (warehouses[civId]) return;
+      const civ = GE.data.civs.find(c => c.id === civId);
+      if (civ) warehouses[civId] = templateWarehouse(civ);
+    });
+    Object.entries(warehouses).forEach(([civId, warehouse]) => {
+      const civ = GE.data.civs.find(c => c.id === civId);
+      if (civ) warehouses[civId] = normalizeWarehouse(civ, warehouse);
+      else delete warehouses[civId];
+    });
     rebuildOutputs();
     built = true;
     return api;
@@ -346,7 +377,8 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
     get tiles(){ build(); return [...resolved.values()]; },
     get revision(){ return revision; },
     get resources(){ return map().resourceCatalog; },
-    get regions(){ return map().regions; }
+    get regions(){ return map().regions; },
+    get warehouseCivIds(){ build(); return Object.keys(warehouses); }
   };
   return api;
 };

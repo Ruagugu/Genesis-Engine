@@ -299,15 +299,38 @@ GE.panels = (function () {
   }
 
   function renderWarehouse(el, c) {
-    const warehouse = GE.worldState.getWarehouse(c.id);
-    const catalog = ((GE.worldState && GE.worldState.def) || GE.data.strategicMap).resourceCatalog;
-    if (!warehouse) {
-      el.innerHTML = `${secHead('grid', '国家仓储', '战略资源流')}<div class="panel"><p class="prose">当前表面（${esc((GE.worldState && GE.worldState.bodyId) || '—')}）尚无该文明的行星仓储。请切换至有其领地的星球，或等待殖民后建立前哨。</p></div>`;
+    const empire = GE.surfaces.getEmpireWarehouse(c.id);
+    const surface = GE.worldState.getWarehouse(c.id);
+    const catalog = GE.data.resourceCatalog;
+    const body = (GE.data.spaceBodies || []).find(b => b.id === GE.worldState.bodyId);
+    const surfaceName = body ? body.name : (GE.worldState.bodyId || '当前表面');
+    const surfaceKey = GE.worldState.surfaceId || '—';
+    if (!empire.surfaces.length) {
+      el.innerHTML = `${secHead('grid', '国家仓储', '帝国战略资源')}<div class="panel"><p class="prose">${esc(c.name)}尚未在任何可登陆天体建立行星仓。殖民地或前哨形成实际领地后，库存会自动纳入帝国汇总。</p></div>`;
       return;
     }
-    el.innerHTML = `${secHead('grid', '国家仓储', '战略资源流')}
-      <div class="panel" style="margin-bottom:14px"><p class="prose" style="font-size:12px">库存由受控战略地块的资源与建筑产出汇总；推演后将更新本轮产出、消耗与净变化。键：${esc(GE.worldState.surfaceId || 'default')}</p></div>
-      <div class="stagger">${Object.entries(catalog).map(([id,r]) => { const stock=warehouse.stock[id], cap=warehouse.capacity[id], net=warehouse.lastTurn.net[id] || 0, pct=Math.round(stock/cap*100); return `<div class="warehouse-row"><div class="wr-head"><span style="color:${r.color};font-weight:700">${esc(r.name)}</span><span class="mono">${stock} / ${cap}</span><span class="wr-net ${net>=0?'up':'down'}">${net>=0?'+':''}${net}</span></div><div class="meter"><i style="--m-color:${r.color};width:${pct}%"></i></div><div class="wr-meta">产出 ${warehouse.lastTurn.produced[id] || 0} · 消耗 ${warehouse.lastTurn.consumed[id] || 0} · ${pct < 25 ? '低储备警告' : pct > 92 ? '接近容量' : '储备稳定'}</div></div>`; }).join('')}</div>`;
+    const scope = surface
+      ? `${esc(surfaceName)} · ${esc(surfaceKey)}`
+      : `${esc(surfaceName)} · 未设仓`;
+    el.innerHTML = `${secHead('grid', '国家仓储', empire.surfaces.length + ' 个行星仓')}
+      <div class="warehouse-scope">
+        <div><span>帝国总仓</span><strong>${empire.surfaces.length} 个表面汇总</strong></div>
+        <div><span>当前表面</span><strong>${scope}</strong></div>
+      </div>
+      <div class="stagger">${Object.entries(catalog).map(([id, r]) => {
+        const empireStock = Number(empire.stock[id]) || 0;
+        const empireCap = Number(empire.capacity[id]) || 0;
+        const empireNet = Number(empire.lastTurn.net[id]) || 0;
+        const surfaceStock = surface ? Number(surface.stock[id]) || 0 : 0;
+        const surfaceCap = surface ? Number(surface.capacity[id]) || 0 : 0;
+        const surfaceNet = surface ? Number(surface.lastTurn.net[id]) || 0 : 0;
+        const pct = empireCap ? Math.round(empireStock / empireCap * 100) : 0;
+        return `<div class="warehouse-row" data-resource="${esc(id)}">
+          <div class="wr-head"><span style="color:${r.color};font-weight:700">${esc(r.name)}</span><span class="mono">${empireStock} / ${empireCap}</span><span class="wr-net ${empireNet >= 0 ? 'up' : 'down'}">${empireNet >= 0 ? '+' : ''}${empireNet}</span></div>
+          <div class="meter"><i style="--m-color:${r.color};width:${pct}%"></i></div>
+          <div class="warehouse-breakdown"><span>帝国 · 产 ${empire.lastTurn.produced[id] || 0} / 耗 ${empire.lastTurn.consumed[id] || 0}</span><span>${surface ? `${esc(surfaceName)} · ${surfaceStock} / ${surfaceCap} · ${surfaceNet >= 0 ? '+' : ''}${surfaceNet}` : `${esc(surfaceName)} · 未设仓`}</span></div>
+        </div>`;
+      }).join('')}</div>`;
   }
 
   function openWarehouse(civId) {

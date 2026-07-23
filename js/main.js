@@ -160,7 +160,7 @@ GE.app = (function () {
   /**
    * 进入任意 landable 天体的星球视图。
    * @param {string} bodyId
-   * @param {{ silent?: boolean }} opts
+   * @param {{ silent?: boolean, unloadPrevious?: boolean }} opts
    */
   function enterPlanet(bodyId, opts) {
     opts = opts || {};
@@ -174,12 +174,13 @@ GE.app = (function () {
       return;
     }
     try {
-      if (GE.surfaces) GE.surfaces.activate(bodyId);
+      if (state.initialized.planet && GE.views.planet.loadSurface) {
+        GE.views.planet.loadSurface(bodyId, { silent: opts.silent, unloadPrevious: opts.unloadPrevious });
+      } else if (GE.surfaces) {
+        GE.surfaces.activate(bodyId);
+      }
       state.activeBodyId = bodyId;
       state.activeSurfaceId = GE.surfaces ? GE.surfaces.activeSurfaceId : null;
-      if (state.initialized.planet && GE.views.planet.loadSurface) {
-        GE.views.planet.loadSurface(bodyId, { silent: opts.silent });
-      }
       switchView('planet', { silent: opts.silent });
       refreshPlanetHud();
       if (!opts.silent) {
@@ -580,7 +581,8 @@ GE.app = (function () {
     GE.data.deduction.log.unshift(log);
 
     if (!opts.edict) {
-      const strategicRevision = GE.worldState.advanceTurn();
+      if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
+      else GE.worldState.advanceTurn();
       const tech = GE.data.civs[0].科技树.节点['亚光速引擎'];
       tech.进度 = Math.min(100, tech.进度 + 7);
       GE.data.civs[0].科技树.下一阶段 = Math.min(100, GE.data.civs[0].科技树.下一阶段 + 3);

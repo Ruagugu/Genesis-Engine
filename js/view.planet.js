@@ -82,7 +82,7 @@ GE.views.planet = (function () {
   /**
    * 切换到指定天体的战略表面（幂等）。
    * @param {string} bodyId
-   * @param {{ silent?: boolean }} opts
+   * @param {{ silent?: boolean, unloadPrevious?: boolean }} opts
    */
   view.loadSurface = function (bodyId, opts) {
     opts = opts || {};
@@ -97,27 +97,50 @@ GE.views.planet = (function () {
       return view;
     }
 
-    GE.surfaces.activate(bodyId);
-    currentBodyId = bodyId;
-    if (GE.app && GE.app.state) {
-      GE.app.state.activeBodyId = bodyId;
-      GE.app.state.activeSurfaceId = GE.surfaces.activeSurfaceId;
-    }
+    const previousBodyId = currentBodyId;
+    const previousEntry = previousBodyId && GE.surfaces.get(previousBodyId);
+    const targetEntry = GE.surfaces.ensure(bodyId);
+    try {
+      GE.surfaces.activate(bodyId);
+      currentBodyId = bodyId;
+      if (GE.app && GE.app.state) {
+        GE.app.state.activeBodyId = bodyId;
+        GE.app.state.activeSurfaceId = GE.surfaces.activeSurfaceId;
+      }
 
-    disposeStrategicLayers();
-    clearSurfaceLabels();
-    buildStrategicMap();
-    buildOrbitalsForBody(bodyId);
-    buildLabels();
-    applyGlobePalette(bodyId);
-    // 切换表面后恢复应用层开关状态（尤其是已关闭的图层）
-    if (view._built && GE.app && GE.app.state && GE.app.state.layer) {
-      Object.entries(GE.app.state.layer).forEach(([key, on]) => view.setLayer(key, on));
-    }
+      disposeStrategicLayers();
+      clearSurfaceLabels();
+      selected = null;
+      if (GE.app && GE.app.clearSelection) GE.app.clearSelection();
+      buildStrategicMap();
+      buildOrbitalsForBody(bodyId);
+      buildLabels();
+      applyGlobePalette(bodyId);
+      // 切换表面后恢复应用层开关状态（尤其是已关闭的图层）
+      if (view._built && GE.app && GE.app.state && GE.app.state.layer) {
+        Object.entries(GE.app.state.layer).forEach(([key, on]) => view.setLayer(key, on));
+      }
 
-    if (view.rig) view.rig.flyTo({ radius: 300, target: new THREE.Vector3() }, opts.silent ? 0 : 1.0);
-    if (GE.app && GE.app.refreshPlanetHud) GE.app.refreshPlanetHud();
-    return view;
+      if (view.rig) view.rig.flyTo({ radius: 300, target: new THREE.Vector3() }, opts.silent ? 0 : 1.0);
+      if (GE.app && GE.app.refreshPlanetHud) GE.app.refreshPlanetHud();
+      if (opts.unloadPrevious && previousEntry && previousEntry !== targetEntry) {
+        GE.surfaces.unload(previousEntry.surfaceId);
+      }
+      return view;
+    } catch (err) {
+      if (previousEntry && previousEntry !== targetEntry) {
+        GE.surfaces.activate(previousEntry.bodyId);
+        currentBodyId = previousEntry.bodyId;
+        disposeStrategicLayers();
+        clearSurfaceLabels();
+        buildStrategicMap();
+        buildOrbitalsForBody(previousEntry.bodyId);
+        buildLabels();
+        applyGlobePalette(previousEntry.bodyId);
+        if (GE.app && GE.app.refreshPlanetHud) GE.app.refreshPlanetHud();
+      }
+      throw err;
+    }
   };
 
   function disposeStrategicLayers() {

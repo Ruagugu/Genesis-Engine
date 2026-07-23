@@ -110,6 +110,77 @@ GE.surfaces = (function () {
     return (GE.data.spaceBodies || []).filter(isLandable);
   }
 
+  function unload(surfaceIdOrBodyId, options) {
+    options = options || {};
+    const entry = get(surfaceIdOrBodyId);
+    if (!entry) return false;
+    if (entry.surfaceId === activeSurfaceId) return false;
+    if (options.persist !== false) entry.state.persist();
+    cache.delete(entry.surfaceId);
+    cache.delete('body:' + entry.bodyId);
+    return true;
+  }
+
+  function warehouseSnapshot(warehouse) {
+    if (!warehouse) return null;
+    return {
+      capacity: Object.assign({}, warehouse.capacity || {}),
+      stock: Object.assign({}, warehouse.stock || {}),
+      lastTurn: {
+        produced: Object.assign({}, warehouse.lastTurn && warehouse.lastTurn.produced || {}),
+        consumed: Object.assign({}, warehouse.lastTurn && warehouse.lastTurn.consumed || {}),
+        net: Object.assign({}, warehouse.lastTurn && warehouse.lastTurn.net || {})
+      },
+      reservePolicy: Object.assign({}, warehouse.reservePolicy || {})
+    };
+  }
+
+  /** 只读派生的帝国总仓；不会切换当前活动表面。 */
+  function getEmpireWarehouse(civId) {
+    const catalog = (GE.data && GE.data.resourceCatalog) || {};
+    const capacity = {}, stock = {}, produced = {}, consumed = {}, net = {};
+    Object.keys(catalog).forEach(id => {
+      capacity[id] = 0; stock[id] = 0; produced[id] = 0; consumed[id] = 0; net[id] = 0;
+    });
+    const surfaces = [];
+    listLandable().forEach(body => {
+      const resident = !!get(body.id);
+      const entry = ensure(body.id);
+      const warehouse = warehouseSnapshot(entry.state.getWarehouse(civId));
+      if (warehouse) {
+        Object.keys(catalog).forEach(id => {
+          capacity[id] += Number(warehouse.capacity[id]) || 0;
+          stock[id] += Number(warehouse.stock[id]) || 0;
+          produced[id] += Number(warehouse.lastTurn.produced[id]) || 0;
+          consumed[id] += Number(warehouse.lastTurn.consumed[id]) || 0;
+          net[id] += Number(warehouse.lastTurn.net[id]) || 0;
+        });
+        surfaces.push({ bodyId: body.id, surfaceId: entry.surfaceId, bodyName: body.name, revision: entry.state.revision, warehouse });
+      }
+      if (!resident && entry.surfaceId !== activeSurfaceId) unload(entry.surfaceId, { persist: false });
+    });
+    return {
+      capacity, stock,
+      lastTurn: { produced, consumed, net },
+      reservePolicy: { food: .35, fuel: .25, energy: .30, iceWater: .4 },
+      surfaces
+    };
+  }
+
+  /** 一次世界结算中，每个实际有仓库的表面只推进一次。 */
+  function advanceAllSurfaceTurns() {
+    const revisions = [];
+    listLandable().forEach(body => {
+      const resident = !!get(body.id);
+      const entry = ensure(body.id);
+      if (entry.state.warehouseCivIds.length) {
+        revisions.push({ bodyId: body.id, surfaceId: entry.surfaceId, revision: entry.state.advanceTurn() });
+      }
+      if (!resident && entry.surfaceId !== activeSurfaceId) unload(entry.surfaceId, { persist: false });
+    });
+    return revisions;
+  }
+
   /** 迁移旧单例 localStorage 键到盖亚表面键（一次性）。 */
   function migrateLegacyStorage() {
     try {
@@ -135,6 +206,9 @@ GE.surfaces = (function () {
     activate,
     getActive,
     listLandable,
+    unload,
+    getEmpireWarehouse,
+    advanceAllSurfaceTurns,
     isLandable,
     isPlayerHome,
     get activeBodyId() { return activeBodyId; },

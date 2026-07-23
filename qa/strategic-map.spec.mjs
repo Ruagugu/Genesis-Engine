@@ -32,7 +32,11 @@ test('tile details and warehouse are accessible', async ({ page }) => {
   await expect(page.locator('#ctx-warehouse')).toBeVisible();
   await page.click('#ctx-warehouse');
   await expect(page.locator('.modal-title')).toContainText('国家仓储');
-  await expect(page.locator('.warehouse-row')).toHaveCount(8);
+  await expect(page.locator('.warehouse-row')).toHaveCount(12);
+  await expect(page.locator('.warehouse-scope')).toContainText('帝国总仓');
+  await expect(page.locator('.warehouse-scope')).toContainText('当前表面');
+  await expect(page.locator('.warehouse-breakdown').first()).toContainText('帝国');
+  await expect(page.locator('.warehouse-breakdown').first()).toContainText('盖亚');
 });
 
 test('strategic layer controls are independent', async ({ page }) => {
@@ -40,6 +44,16 @@ test('strategic layer controls are independent', async ({ page }) => {
   await page.click('#lb-regions');
   await expect(page.locator('#lb-regions')).not.toHaveClass(/on/);
   await expect(page.locator('#lb-ownership')).toHaveClass(/on/);
+});
+
+test('merged warehouse marks a current surface without a warehouse', async ({ page }) => {
+  await page.evaluate(() => {
+    GE.app.enterPlanet('yinhui', { silent: true });
+    GE.panels.openWarehouse('dawn');
+  });
+  await expect(page.locator('.warehouse-scope')).toContainText('帝国总仓');
+  await expect(page.locator('.warehouse-scope')).toContainText('银辉 · 未设仓');
+  await expect(page.locator('.warehouse-row')).toHaveCount(12);
 });
 
 test('warehouse advances and remains bounded', async ({ page }) => {
@@ -52,4 +66,27 @@ test('warehouse advances and remains bounded', async ({ page }) => {
   expect(result.after).toBe(result.before + 1);
   expect(result.valid).toBe(true);
   expect(result.hasFlow).toBe(true);
+});
+
+test('merged warehouse uses empire totals without switching surfaces', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const active = GE.surfaces.getActive();
+    const moon = GE.surfaces.ensure('yinhui').state;
+    const empire = GE.surfaces.getEmpireWarehouse('dawn');
+    return {
+      activeBodyId: GE.surfaces.activeBodyId,
+      sameState: GE.worldState.active === active.state,
+      moonWarehouse: moon.getWarehouse('dawn'),
+      surfaceIds: empire.surfaces.map(s => s.surfaceId),
+      resourceKeys: Object.keys(empire.stock),
+      finite: Object.values(empire.capacity).every(Number.isFinite) && Object.values(empire.stock).every(Number.isFinite)
+    };
+  });
+
+  expect(result.activeBodyId).toBe('gaiya');
+  expect(result.sameState).toBe(true);
+  expect(result.moonWarehouse).toBeNull();
+  expect(result.surfaceIds).toEqual(['gaiya:surface']);
+  expect(result.resourceKeys).toHaveLength(12);
+  expect(result.finite).toBe(true);
 });
