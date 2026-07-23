@@ -24,6 +24,24 @@ GE.views.planet = (function () {
   let raycaster, pointer, downPos;
   let selected = null;          // 当前选中 {type, civId/obj}
   let time = 0;
+  let currentBodyId = null;
+  let pointerBound = false;
+
+  function activeSurfaceDef() {
+    return (GE.worldState && GE.worldState.def) || GE.data.strategicMap;
+  }
+  function activeBody() {
+    const id = currentBodyId || (GE.app && GE.app.state && GE.app.state.activeBodyId) || 'gaiya';
+    return (GE.data.spaceBodies || []).find(b => b.id === id) || null;
+  }
+  function catalog() {
+    const def = activeSurfaceDef();
+    return {
+      terrain: def.terrainCatalog || GE.data.terrainCatalog || GE.data.strategicMap.terrainCatalog,
+      resource: def.resourceCatalog || GE.data.resourceCatalog || GE.data.strategicMap.resourceCatalog,
+      building: def.buildingCatalog || GE.data.buildingCatalog || GE.data.strategicMap.buildingCatalog
+    };
+  }
 
   /* ============ 初始化 ============ */
   view.init = function (e) {
@@ -46,18 +64,129 @@ GE.views.planet = (function () {
 
     buildBackground();
     buildGlobe();
-    buildStrategicMap();
     buildAtmosphere();
     buildClouds();
-    buildSatelliteShell();
-    buildStationAndShips();
     buildHoverMarker();
-    buildLabels();
-    bindPointer();
+    if (!pointerBound) { bindPointer(); pointerBound = true; }
+
+    // 默认加载当前激活表面（SurfaceRegistry 在 boot 中已 activate）
+    const bodyId = (GE.app && GE.app.state && GE.app.state.activeBodyId)
+      || (GE.surfaces && GE.surfaces.activeBodyId)
+      || 'gaiya';
+    view.loadSurface(bodyId, { silent: true });
 
     view._built = true;
     return view;
   };
+
+  /**
+   * 切换到指定天体的战略表面（幂等）。
+   * @param {string} bodyId
+   * @param {{ silent?: boolean }} opts
+   */
+  view.loadSurface = function (bodyId, opts) {
+    opts = opts || {};
+    if (!bodyId) bodyId = 'gaiya';
+    if (!GE.surfaces) throw new Error('SurfaceRegistry not loaded');
+    if (!GE.surfaces.isLandable(GE.data.spaceBodies.find(b => b.id === bodyId))) {
+      throw new Error('body not landable: ' + bodyId);
+    }
+    if (currentBodyId === bodyId && terrainMesh) {
+      // 已是当前表面：仅确保门面绑定
+      GE.surfaces.activate(bodyId);
+      return view;
+    }
+
+    GE.surfaces.activate(bodyId);
+    currentBodyId = bodyId;
+    if (GE.app && GE.app.state) {
+      GE.app.state.activeBodyId = bodyId;
+      GE.app.state.activeSurfaceId = GE.surfaces.activeSurfaceId;
+    }
+
+    disposeStrategicLayers();
+    clearSurfaceLabels();
+    buildStrategicMap();
+    buildOrbitalsForBody(bodyId);
+    buildLabels();
+    applyGlobePalette(bodyId);
+    // 切换表面后恢复应用层开关状态（尤其是已关闭的图层）
+    if (view._built && GE.app && GE.app.state && GE.app.state.layer) {
+      Object.entries(GE.app.state.layer).forEach(([key, on]) => view.setLayer(key, on));
+    }
+
+    if (view.rig) view.rig.flyTo({ radius: 300, target: new THREE.Vector3() }, opts.silent ? 0 : 1.0);
+    if (GE.app && GE.app.refreshPlanetHud) GE.app.refreshPlanetHud();
+    return view;
+  };
+
+  function disposeStrategicLayers() {
+    const disposeObj = (o) => {
+      if (!o) return;
+      if (o.parent) o.parent.remove(o);
+      o.traverse && o.traverse(ch => {
+        if (ch.geometry) ch.geometry.dispose();
+        if (ch.material) {
+          if (Array.isArray(ch.material)) ch.material.forEach(m => m.dispose && m.dispose());
+          else if (ch.material.dispose) ch.material.dispose();
+        }
+      });
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        if (Array.isArray(o.material)) o.material.forEach(m => m.dispose && m.dispose());
+        else if (o.material.dispose) o.material.dispose();
+      }
+    };
+    [terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints].forEach(disposeObj);
+    terrainMesh = regionMesh = ownershipMesh = regionBorders = politicalBorders = assetPoints = null;
+    faceTileIds = [];
+    view._capitals = [];
+    disposeOrbitals();
+  }
+
+  function disposeOrbitals() {
+    if (satShell) {
+      if (satShell.orbitGroup && satShell.orbitGroup.parent) satShell.orbitGroup.parent.remove(satShell.orbitGroup);
+      if (satShell.satMesh && satShell.satMesh.parent) satShell.satMesh.parent.remove(satShell.satMesh);
+      if (satShell.ringMesh && satShell.ringMesh.parent) satShell.ringMesh.parent.remove(satShell.ringMesh);
+      if (satShell.shellGlow && satShell.shellGlow.parent) satShell.shellGlow.parent.remove(satShell.shellGlow);
+      satShell = null;
+    }
+    if (station && station.group) {
+      if (station.group.parent) station.group.parent.remove(station.group);
+      station = null;
+    }
+    ships.forEach(s => { if (s.mesh && s.mesh.parent) s.mesh.parent.remove(s.mesh); });
+    ships = [];
+  }
+
+  function clearSurfaceLabels() {
+    if (!labels || !labels.remove) return;
+    (view._labelIds || []).forEach(id => labels.remove(id));
+    view._labelIds = [];
+  }
+
+  function buildOrbitalsForBody(bodyId) {
+    // 星链 / 望舒仅在盖亚有叙事意义；其他天体暂不显示
+    if (bodyId === 'gaiya') {
+      buildSatelliteShell();
+      buildStationAndShips();
+    }
+  }
+
+  function applyGlobePalette(bodyId) {
+    const body = GE.data.spaceBodies.find(b => b.id === bodyId);
+    if (!body || !globe || !globe.material || !globe.material.uniforms) return;
+    // 通过 sun 强度与 ambient 粗调非宜居体氛围
+    const hydro = (body.climateProfile && body.climateProfile.hydrosphere) || 0.37;
+    const cold = body.climateProfile && (body.climateProfile.meanTemp === 'cold' || body.climateProfile.meanTemp === 'frigid');
+    const hot = body.climateProfile && body.climateProfile.meanTemp === 'hot';
+    if (ambient) ambient.intensity = cold ? 0.55 : hot ? 1.05 : 0.85;
+    if (sunLight) sunLight.intensity = hot ? 1.9 : cold ? 1.1 : 1.5;
+    // 云层：干旱/冰月弱化
+    if (clouds) clouds.visible = hydro > 0.12;
+    if (atmo) atmo.visible = true;
+  }
 
   /* ============ 背景星空 ============ */
   function buildBackground() {
@@ -282,11 +411,14 @@ GE.views.planet = (function () {
     terrainMesh.userData.faceTileIds = faceTileIds;
     view.scene.add(terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints);
 
-    view._capitals = GE.data.civs.map(c => {
-      const seed = GE.data.strategicMap.capitalSeeds[c.id];
-      const tile = GE.worldGrid.nearestLatLon(seed.lat, seed.lon);
-      return { id: c.id, name: c.capital, civName: c.name, color: c.color, tileId: tile.id, pos: new THREE.Vector3(...tile.center).multiplyScalar(R * 1.05) };
-    });
+    const seeds = activeSurfaceDef().capitalSeeds || {};
+    view._capitals = GE.data.civs
+      .filter(c => seeds[c.id])
+      .map(c => {
+        const seed = seeds[c.id];
+        const tile = GE.worldGrid.nearestLatLon(seed.lat, seed.lon);
+        return { id: c.id, name: c.capital, civName: c.name, color: c.color, tileId: tile.id, pos: new THREE.Vector3(...tile.center).multiplyScalar(R * 1.05) };
+      });
   }
 
   /* ============ 大气层 ============ */
@@ -446,23 +578,32 @@ GE.views.planet = (function () {
 
   /* ============ 标签 ============ */
   function buildLabels() {
+    view._labelIds = view._labelIds || [];
     (view._capitals || []).forEach(cap => {
-      labels.add('cap-' + cap.id, (v) => v.copy(cap.pos),
+      const id = 'cap-' + cap.id;
+      labels.add(id, (v) => v.copy(cap.pos),
         `<div class="ml-inner"><div class="ml-name">${cap.name}</div><div class="ml-tick"></div><div class="ml-dot" style="--ml-c:${cap.color}"></div></div>`,
         { className: 'capital', occlude: true, occludeThreshold: 0.06, fadeFar: [520, 660],
           onClick: () => GE.panels.openCiv(cap.id) });
+      view._labelIds.push(id);
       cap.el && cap.el.style.setProperty('--ml-c', cap.color);
     });
     GE.worldState.regions.forEach(region => {
       const tiles = GE.worldState.getTilesByRegion(region.id);
+      if (!tiles.length) return;
       const pos = tiles.reduce((sum, tile) => sum.add(new THREE.Vector3(...tile.center)), new THREE.Vector3()).normalize().multiplyScalar(R * 1.045);
-      labels.add('region-' + region.id, v => v.copy(pos),
+      const id = 'region-' + region.id;
+      labels.add(id, v => v.copy(pos),
         `<div class="ml-inner"><div class="ml-name">${region.name}</div><div class="ml-sub">地理区域</div></div>`,
         { className:'planet clickable', occlude:true, occludeThreshold:.08, fadeFar:[300, 520], onClick:() => GE.panels.openRegion(region.id) });
+      view._labelIds.push(id);
     });
-    labels.add('station', (v) => station ? v.copy(station.group.position) : v.set(0, 0, 0),
-      `<div class="ml-inner"><div class="ml-name">望舒轨道站</div><div class="ml-sub">晨曦联邦 · 前哨</div></div>`,
-      { className: '', occlude: false, fadeFar: [560, 700], onClick: () => GE.panels.openStation() });
+    if (station) {
+      labels.add('station', (v) => station ? v.copy(station.group.position) : v.set(0, 0, 0),
+        `<div class="ml-inner"><div class="ml-name">望舒轨道站</div><div class="ml-sub">晨曦联邦 · 前哨</div></div>`,
+        { className: '', occlude: false, fadeFar: [560, 700], onClick: () => GE.panels.openStation() });
+      view._labelIds.push('station');
+    }
   }
 
   /* ============ 指针交互 ============ */
@@ -550,18 +691,20 @@ GE.views.planet = (function () {
       hoverHex.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
       const civ = hex.ownerCivId ? GE.data.civs.find(c => c.id === hex.ownerCivId) : null;
       const region = GE.worldState.getRegion(hex.regionId);
-      const resources = hex.resources.slice(0, 2).map(r => GE.data.strategicMap.resourceCatalog[r.resourceId].name).join('、') || '无显著产出';
+      const cat = catalog();
+      const resources = hex.resources.slice(0, 2).map(r => (cat.resource[r.resourceId] || {}).name || r.resourceId).join('、') || '无显著产出';
+      const terrainName = (cat.terrain[hex.terrain] || {}).name || hex.terrain;
       GE.app.showHoverCard(e, {
-        title: GE.data.strategicMap.terrainCatalog[hex.terrain].name + ' · ' + hex.id,
-        sub: region.name + (civ ? ' · ' + civ.name : ' · 无主'),
+        title: terrainName + ' · ' + hex.id,
+        sub: (region ? region.name : '未知区域') + (civ ? ' · ' + civ.name : ' · 无主'),
         rows: [['地块', hex.kind === 'pentagon' ? '五边战略地块' : '六边战略地块'], ['资源', resources]]
       });
     } else { hideHover(); }
   }
   function hideHover() {
-    hoverHex.visible = false;
-    env.dom.style.cursor = '';
-    GE.app.hideHoverCard();
+    if (hoverHex) hoverHex.visible = false;
+    if (env && env.dom) env.dom.style.cursor = '';
+    if (GE.app) GE.app.hideHoverCard();
   }
 
   function selectHex(hex) { selected = { type: 'hex', hex }; }
@@ -571,13 +714,13 @@ GE.views.planet = (function () {
     if (!view._built) return;
     switch (key) {
       case 'labels': env.labelsVisible = on; document.getElementById('map-labels').style.display = on ? '' : 'none'; break;
-      case 'grid': regionBorders.visible = on; politicalBorders.visible = on; break;
-      case 'regions': regionMesh.visible = on; regionBorders.visible = on; break;
-      case 'ownership': ownershipMesh.visible = on; politicalBorders.visible = on; break;
-      case 'assets': assetPoints.visible = on; break;
-      case 'orbit': satShell.orbitGroup.visible = on; satShell.satMesh.visible = on; break;
-      case 'coverage': satShell.ringMesh.visible = on; break;
-      case 'atmo': atmo.visible = on; glow.visible = on; break;
+      case 'grid': if (regionBorders) regionBorders.visible = on; if (politicalBorders) politicalBorders.visible = on; break;
+      case 'regions': if (regionMesh) regionMesh.visible = on; if (regionBorders) regionBorders.visible = on; break;
+      case 'ownership': if (ownershipMesh) ownershipMesh.visible = on; if (politicalBorders) politicalBorders.visible = on; break;
+      case 'assets': if (assetPoints) assetPoints.visible = on; break;
+      case 'orbit': if (satShell) { satShell.orbitGroup.visible = on; satShell.satMesh.visible = on; } break;
+      case 'coverage': if (satShell) satShell.ringMesh.visible = on; break;
+      case 'atmo': if (atmo) atmo.visible = on; if (glow) glow.visible = on; break;
     }
   };
 
@@ -588,10 +731,12 @@ GE.views.planet = (function () {
     const dayAngle = elapsed * 0.03;
     sunDir.set(Math.cos(dayAngle), 0.28, Math.sin(dayAngle)).normalize();
     sunLight.position.copy(sunDir).multiplyScalar(500);
-    globe.material.uniforms.uTime.value = elapsed;
-    clouds.material.uniforms.uTime.value = elapsed;
-    clouds.rotation.y += dt * 0.004;
-    starfield.material.uniforms.uTime.value = elapsed;
+    if (globe && globe.material.uniforms) globe.material.uniforms.uTime.value = elapsed;
+    if (clouds && clouds.visible) {
+      clouds.material.uniforms.uTime.value = elapsed;
+      clouds.rotation.y += dt * 0.004;
+    }
+    if (starfield && starfield.material.uniforms) starfield.material.uniforms.uTime.value = elapsed;
 
     // 卫星与覆盖圈
     if (satShell) {
@@ -638,7 +783,7 @@ GE.views.planet = (function () {
     });
 
     // 悬停标记脉动
-    if (hoverHex.visible) {
+    if (hoverHex && hoverHex.visible) {
       const s = 1 + 0.06 * Math.sin(elapsed * 6);
       hoverHex.scale.setScalar(s);
     }
@@ -648,8 +793,16 @@ GE.views.planet = (function () {
 
   view.render = function (renderer) { renderer.render(view.scene, view.camera); };
   view.resize = function (w, h) { view.camera.aspect = w / h; view.camera.updateProjectionMatrix(); };
-  view.activate = function () { if (env) env.dom.classList.remove('dragging'); };
+  view.activate = function () {
+    if (env) env.dom.classList.remove('dragging');
+    // 切回星球视图时对齐当前 activeBodyId
+    const want = (GE.app && GE.app.state && GE.app.state.activeBodyId) || currentBodyId || 'gaiya';
+    if (want && want !== currentBodyId) {
+      try { view.loadSurface(want, { silent: true }); } catch (e) { console.warn(e); }
+    }
+  };
   view.deactivate = function () { downPos = null; hideHover(); };
+  view.getBodyId = function () { return currentBodyId; };
   view.focusTile = function (tileId) {
     const tile = GE.worldState.getTile(tileId); if (!tile) return;
     view.rig.flyTo({ radius: 190, target:new THREE.Vector3(...tile.center).multiplyScalar(R) }, 1.2);

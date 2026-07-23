@@ -1,13 +1,23 @@
 /* ============================================================
    创世引擎 · world-state.js — 战略地块与国家仓储状态
    只持久化变更；基础地形与拓扑由数据和种子确定性重建。
+   支持按 surfaceDef 多实例；GE.worldState 为「当前激活表面」门面。
    ============================================================ */
 window.GE = window.GE || {};
 
-GE.worldState = (function () {
+/**
+ * @param {object} surfaceDef  含 topology / regions / catalogs / capitalSeeds / claimRadius
+ * @param {{ storageKey: string, grid?: object }} options
+ *   grid 可选；缺省时使用 GE.worldGrid（须已绑定到同一表面）
+ */
+GE.createWorldState = function createWorldState(surfaceDef, options) {
   'use strict';
-  const KEY = 'genesis-engine-strategic-map-v1';
-  const map = () => GE.data.strategicMap;
+  if (!surfaceDef) throw new Error('createWorldState: surfaceDef required');
+  options = options || {};
+  const KEY = options.storageKey || ('genesis-engine-surface-' + (surfaceDef.id || 'default') + '-v1');
+  const map = () => surfaceDef;
+  const gridApi = () => options.grid || GE.worldGrid;
+
   let resolved = new Map();
   let warehouses = {};
   let revision = 0;
@@ -17,8 +27,9 @@ GE.worldState = (function () {
 
   function ensureSeeds() {
     if (regionSeeds && capitalSeeds) return;
-    regionSeeds = Object.fromEntries(map().regions.map(region => [region.id, GE.worldGrid.nearestLatLon(region.lat, region.lon)]));
-    capitalSeeds = Object.fromEntries(Object.entries(map().capitalSeeds).map(([civId, seed]) => [civId, GE.worldGrid.nearestLatLon(seed.lat, seed.lon)]));
+    const g = gridApi();
+    regionSeeds = Object.fromEntries(map().regions.map(region => [region.id, g.nearestLatLon(region.lat, region.lon)]));
+    capitalSeeds = Object.fromEntries(Object.entries(map().capitalSeeds || {}).map(([civId, seed]) => [civId, g.nearestLatLon(seed.lat, seed.lon)]));
   }
   function rng(v) {
     let n = Math.sin(v * 12.9898 + map().topology.seed * 0.0001) * 43758.5453;
@@ -29,8 +40,11 @@ GE.worldState = (function () {
     const [x, y, z] = grid.center;
     const lat = Math.abs(grid.lat) / 90;
     const land = 0.55 * rng(x * 7 + y * 13 + z * 17) + 0.45 * rng(x * 23 - y * 11 + z * 5);
-    if (land < .37) return 'ocean';
-    if (land < .43) return 'coast';
+    // 气候配置：海洋阈值等可按 surface 覆盖
+    const hydrosphere = map().climateProfile && map().climateProfile.hydrosphere != null
+      ? map().climateProfile.hydrosphere : 0.37;
+    if (land < hydrosphere) return 'ocean';
+    if (land < hydrosphere + 0.06) return 'coast';
     if (lat > .87) return 'ice';
     if (lat > .72) return 'tundra';
     if (land > .84) return 'mountain';
@@ -64,18 +78,23 @@ GE.worldState = (function () {
   function buildingFor(tile) {
     const r = rng(tile.index * 17.17);
     if (!tile.ownerCivId || r > .025) return [];
+    const catalog = map().buildingCatalog;
     const typeId = tile.terrain === 'plains' ? 'granary' : tile.terrain === 'forest' ? 'grove' :
       tile.terrain === 'hills' || tile.terrain === 'mountain' ? 'forge' : tile.terrain === 'coast' || tile.terrain === 'ocean' ? 'port' : 'extractor';
-    return [{ id:`${typeId}-${tile.id}`, typeId, name:map().buildingCatalog[typeId].name, level:1 + Math.floor(rng(tile.index * 9) * 2), status:'运行中' }];
+    if (!catalog[typeId]) return [];
+    return [{ id:`${typeId}-${tile.id}`, typeId, name:catalog[typeId].name, level:1 + Math.floor(rng(tile.index * 9) * 2), status:'运行中' }];
   }
   function initialOwner(grid, terrain) {
     const water = terrain === 'ocean' || terrain === 'coast';
     let found = null, score = Infinity;
     ensureSeeds();
-    Object.entries(map().capitalSeeds).forEach(([civId]) => {
+    const claims = map().claimRadius || {};
+    Object.entries(map().capitalSeeds || {}).forEach(([civId]) => {
       const cap = capitalSeeds[civId];
+      if (!cap) return;
       const d = angle(grid.center, cap.center) * 180 / Math.PI;
-      const allowed = map().claimRadius[civId] + (rng(grid.index * 5 + cap.index) - .5) * 3;
+      const radius = claims[civId] != null ? claims[civId] : 12;
+      const allowed = radius + (rng(grid.index * 5 + cap.index) - .5) * 3;
       if (d < allowed && d < score && (civId === 'abyss' ? water : !water)) { found = civId; score = d; }
     });
     return found;
@@ -92,21 +111,37 @@ GE.worldState = (function () {
   }
   function build() {
     if (built) return api;
-    GE.worldGrid.build();
-    GE.worldGrid.tiles.forEach(grid => {
+    const g = gridApi();
+    g.build();
+    g.tiles.forEach(grid => {
       const terrain = terrainFor(grid);
       const region = regionFor(grid);
       const ownerCivId = initialOwner(grid, terrain);
+      const terrainMeta = map().terrainCatalog[terrain] || { elevation: '低地' };
       const tile = {
-        ...grid, terrain, elevationBand:map().terrainCatalog[terrain].elevation,
-        regionId:region.id, ownerCivId, status:ownerCivId ? '已开发' : terrain === 'ocean' ? '深海' : '未开发',
+        ...grid, terrain, elevationBand: terrainMeta.elevation,
+        regionId: region ? region.id : (map().regions[0] && map().regions[0].id),
+        ownerCivId, status:ownerCivId ? '已开发' : terrain === 'ocean' ? '深海' : '未开发',
         resources:[], buildings:[], output:{}
       };
       tile.resources = resourceFor(tile);
       tile.buildings = buildingFor(tile);
       resolved.set(tile.id, tile);
     });
-    GE.data.civs.forEach(c => { warehouses[c.id] = templateWarehouse(c); });
+    // 仅对在本表面有 capital 的文明建仓；其余文明不建行星仓（帝国总仓后置）
+    const presentCivIds = new Set(Object.keys(map().capitalSeeds || {}));
+    GE.data.civs.forEach(c => {
+      if (presentCivIds.size === 0 || presentCivIds.has(c.id)) {
+        warehouses[c.id] = templateWarehouse(c);
+      }
+    });
+    // 若有领地但无 capital 配置（纯勘察星），仍给有地块的文明建仓
+    resolved.forEach(t => {
+      if (t.ownerCivId && !warehouses[t.ownerCivId]) {
+        const civ = GE.data.civs.find(c => c.id === t.ownerCivId);
+        if (civ) warehouses[t.ownerCivId] = templateWarehouse(civ);
+      }
+    });
     hydrate();
     rebuildOutputs();
     built = true;
@@ -123,7 +158,7 @@ GE.worldState = (function () {
   function serialize() {
     const tilePatches = {};
     resolved.forEach(t => { if (t._changed) tilePatches[t.id] = { ownerCivId:t.ownerCivId, status:t.status, resources:t.resources, buildings:t.buildings }; });
-    return { revision, warehouses, tilePatches };
+    return { revision, warehouses, tilePatches, surfaceId: surfaceDef.id };
   }
   function persist() { try { localStorage.setItem(KEY, JSON.stringify(serialize())); } catch (_) {} }
   function hydrate() {
@@ -147,13 +182,18 @@ GE.worldState = (function () {
   }
   function advanceTurn() {
     build();
-    GE.data.civs.forEach(c => {
-      const warehouse = warehouses[c.id], summary = getCivSummary(c.id);
+    Object.keys(warehouses).forEach(civId => {
+      const c = GE.data.civs.find(x => x.id === civId);
+      if (!c) return;
+      const warehouse = warehouses[civId], summary = getCivSummary(civId);
       const produced = {}, consumed = {}, net = {};
       Object.keys(map().resourceCatalog).forEach(id => {
         const production = summary.output[id] || 0;
         const use = id === 'food' ? Math.max(1, Math.round(c.stats.人口 / 65)) : id === 'energy' ? Math.max(1, Math.round(c.level * 5 + c.stats.科研 / 18)) : id === 'fuel' ? Math.round(c.stats.军力 / 24) : 0;
-        produced[id] = production; consumed[id] = use; net[id] = production - use;
+        // 非母星表面：消耗按本星存在度打折（MVP：有领地才按 15% 人口当量）
+        const scale = surfaceDef.bodyId === 'gaiya' ? 1 : Math.min(1, Math.max(0.05, tilesOwnedRatio(civId)));
+        const useScaled = Math.round(use * scale);
+        produced[id] = production; consumed[id] = useScaled; net[id] = production - useScaled;
         warehouse.stock[id] = Math.max(0, Math.min(warehouse.capacity[id], warehouse.stock[id] + net[id]));
       });
       warehouse.lastTurn = { produced, consumed, net };
@@ -161,8 +201,62 @@ GE.worldState = (function () {
     revision++; persist();
     return revision;
   }
+  function tilesOwnedRatio(civId) {
+    const all = [...resolved.values()];
+    if (!all.length) return 0;
+    return all.filter(t => t.ownerCivId === civId).length / all.length;
+  }
   function clearPersisted() { try { localStorage.removeItem(KEY); } catch (_) {} }
-  const api = { build, getTile, getRegion, getTilesByCiv, getTilesByRegion, getWarehouse, getCivSummary, advanceTurn, persist, clearPersisted,
-    get tiles(){ build(); return [...resolved.values()]; }, get revision(){ return revision; }, get resources(){ return map().resourceCatalog; }, get regions(){ return map().regions; } };
+
+  const api = {
+    build, getTile, getRegion, getTilesByCiv, getTilesByRegion, getWarehouse, getCivSummary, advanceTurn, persist, clearPersisted,
+    get surfaceId() { return surfaceDef.id; },
+    get bodyId() { return surfaceDef.bodyId; },
+    get def() { return surfaceDef; },
+    get storageKey() { return KEY; },
+    get tiles(){ build(); return [...resolved.values()]; },
+    get revision(){ return revision; },
+    get resources(){ return map().resourceCatalog; },
+    get regions(){ return map().regions; }
+  };
   return api;
+};
+
+/** 当前激活表面状态门面；由 SurfaceRegistry.activate 绑定。 */
+GE.worldState = (function () {
+  'use strict';
+  let active = null;
+
+  function requireActive() {
+    if (!active) {
+      if (GE.surfaces && typeof GE.surfaces.ensure === 'function') {
+        const bodyId = (GE.app && GE.app.state && GE.app.state.activeBodyId) || 'gaiya';
+        GE.surfaces.activate(bodyId);
+      }
+      if (!active) throw new Error('GE.worldState: no active surface');
+    }
+    return active;
+  }
+
+  return {
+    bind(state) { active = state || null; },
+    get active() { return active; },
+    build() { return requireActive().build(); },
+    getTile(id) { return requireActive().getTile(id); },
+    getRegion(id) { return requireActive().getRegion(id); },
+    getTilesByCiv(id) { return requireActive().getTilesByCiv(id); },
+    getTilesByRegion(id) { return requireActive().getTilesByRegion(id); },
+    getWarehouse(id) { return requireActive().getWarehouse(id); },
+    getCivSummary(id) { return requireActive().getCivSummary(id); },
+    advanceTurn() { return requireActive().advanceTurn(); },
+    persist() { return requireActive().persist(); },
+    clearPersisted() { return requireActive().clearPersisted(); },
+    get tiles() { return requireActive().tiles; },
+    get revision() { return requireActive().revision; },
+    get resources() { return requireActive().resources; },
+    get regions() { return requireActive().regions; },
+    get surfaceId() { return active ? active.surfaceId : null; },
+    get bodyId() { return active ? active.bodyId : null; },
+    get def() { return active ? active.def : null; }
+  };
 })();

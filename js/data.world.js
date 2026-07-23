@@ -415,36 +415,54 @@ GE.data = (function () {
       status:{ dawn:"locked", aurel:"locked", sylva:"locked", bronze:"locked", abyss:"locked" } }
   ];
 
-  /* ---------- 太空天体（曦阳星系） ---------- */
+  /* ---------- 太空天体（曦阳星系） ----------
+     flags.landable 决定可否进入星球地图；flags.isPlayerHome 仅叙事/默认相机。
+     home 字段保留兼容（= isPlayerHome），新代码请读 flags。 */
   const spaceBodies = [
     { id:"xiyang", name:"曦阳", type:"恒星", subtype:"黄矮星", color:"#ffd9a0", radius:26,
-      orbit:null, desc:"星系的心脏，主序黄矮星，灵能随其耀斑周期涨落。" },
+      orbit:null, flags:{ landable:false, surveyed:'none' },
+      desc:"星系的心脏，主序黄矮星，灵能随其耀斑周期涨落。" },
     { id:"yanhe", name:"炎核星", type:"岩质行星", subtype:"干旱型", color:"#c98452", radius:5,
       orbit:{ a:150, e:0.06, inc:2, period:88, phase:0.5 },
+      flags:{ landable:true, surveyed:'remote', colonized:false }, surfaceId:'yanhe:surface', surfaceSeed:20260721,
+      climateProfile:{ hydrosphere:0.08, meanTemp:'hot', energyAffinity:0.15 },
       desc:"距曦阳最近的岩质行星，表面被炙烤成玻璃状的荒原。" },
-    { id:"gaiya", name:"盖亚", type:"类地行星", subtype:"宜居", color:"#4fa8e0", radius:8, home:true,
+    { id:"gaiya", name:"盖亚", type:"类地行星", subtype:"宜居", color:"#4fa8e0", radius:8,
+      home:true, /* 兼容旧入口 */
       orbit:{ a:230, e:0.03, inc:0, period:365, phase:2.1 },
+      flags:{ landable:true, isPlayerHome:true, surveyed:'surface', colonized:true },
+      surfaceId:'gaiya:surface', surfaceSeed:20260723,
+      climateProfile:{ hydrosphere:0.37, meanTemp:'temperate', energyAffinity:0.55 },
       desc:"文明的摇篮，蔚蓝的母星。星链之壳正环绕着它缓缓旋转。" },
     { id:"yinhui", name:"银辉", type:"卫星", subtype:"盖亚之月", color:"#c8ccd8", radius:3, parent:"gaiya",
       orbit:{ a:24, e:0.05, inc:5, period:27, phase:1.2 },
+      flags:{ landable:true, surveyed:'orbital', colonized:false }, surfaceId:'yinhui:surface', surfaceSeed:20260724,
+      climateProfile:{ hydrosphere:0.02, meanTemp:'cold', energyAffinity:0.08 },
       desc:"盖亚唯一的天然卫星，联邦计划在此建立首座永久前哨。" },
     { id:"cangqiong", name:"苍穹星", type:"气态巨星", subtype:"风暴型", color:"#d8a86a", radius:16,
       orbit:{ a:520, e:0.08, inc:1.3, period:4300, phase:4.0 }, ring:true,
+      flags:{ landable:false, surveyed:'remote' },
       desc:"巨大的气态巨星，其永恒的猩红风暴之眼已凝视星系数千年。" },
     { id:"shuanghuan", name:"霜环星", type:"冰巨星", subtype:"环带型", color:"#8fd0e8", radius:11,
       orbit:{ a:820, e:0.05, inc:3.1, period:11000, phase:5.3 }, ring:true,
+      flags:{ landable:false, surveyed:'remote' },
       desc:"苍白的冰巨星，一道纤薄的冰晶环带是它唯一的装饰。" },
     { id:"youxing", name:"幽星", type:"矮行星", subtype:"边陲", color:"#8a90a8", radius:2.6,
       orbit:{ a:1120, e:0.16, inc:9, period:26000, phase:0.9 },
+      flags:{ landable:true, surveyed:'remote', colonized:false }, surfaceId:'youxing:surface', surfaceSeed:20260720,
+      climateProfile:{ hydrosphere:0.05, meanTemp:'frigid', energyAffinity:0.04 },
       desc:"星系边陲的矮行星，孤寂地游荡在灵能微弱的黑暗之中。" },
     { id:"xiaoxingdai", name:"碎星带", type:"小行星带", subtype:"资源带", color:"#9aa2b8", radius:0,
       orbit:{ a:370, e:0.0, inc:1.6, period:2100, phase:0 },
+      flags:{ landable:false, surveyed:'remote' },
       desc:"介于盖亚与苍穹星之间的小行星带，蕴藏着丰富的稀有矿藏。" },
     { id:"wangshu", name:"望舒轨道站", type:"空间站", subtype:"联邦前哨", color:"#6fe0f0", radius:2.2, parent:"gaiya",
       orbit:{ a:13.5, e:0.0, inc:28, period:1.6, phase:0 },
+      flags:{ landable:false, surveyed:'surface' },
       desc:"晨曦联邦的轨道之心，揽星计划的神经中枢，星链星座自此处调度。" },
     { id:"shenyuanzhitong", name:"深渊之瞳", type:"黑洞", subtype:"史瓦西", color:"#000000", radius:7,
       orbit:{ a:1500, e:0.0, inc:-14, period:60000, phase:2.6 },
+      flags:{ landable:false, surveyed:'remote' },
       desc:"星系边缘的流浪黑洞，一颗死去的恒星留下的凝视。没有人敢直视它太久。" }
   ];
 
@@ -501,10 +519,35 @@ GE.data = (function () {
     { name:"曙光纪元", years:"进行中 · 已 1247 年", desc:"超光速壁垒将破，万邦仰望星空的时代。", current:true }
   ];
 
-  /* ---------- 战略地图基线（地形由确定性网格解析，变更以 stable tile ID 存储） ---------- */
+  /* ---------- 共享目录（多星球表面复用） ---------- */
+  const terrainCatalog = {
+    ice:{ name:'冰原', color:'#e6eef6', elevation:'冰盖' }, tundra:{ name:'冻土', color:'#a8b294', elevation:'低地' },
+    desert:{ name:'沙漠', color:'#dcc388', elevation:'盆地' }, plains:{ name:'平原', color:'#86ab6b', elevation:'低地' },
+    forest:{ name:'森林', color:'#4f8458', elevation:'丘陵' }, hills:{ name:'丘陵', color:'#9a9a72', elevation:'高地' },
+    mountain:{ name:'山脉', color:'#8d929c', elevation:'山地' }, coast:{ name:'海岸', color:'#2f6d88', elevation:'海平面' }, ocean:{ name:'海洋', color:'#14304a', elevation:'深海' }
+  };
+  const resourceCatalog = {
+    food:{ name:'粮食', color:'#d8b76a', unit:'储量', icon:'wheat' }, biomass:{ name:'生物质', color:'#6fd08c', unit:'储量', icon:'tree' },
+    materials:{ name:'石材建材', color:'#a7a09a', unit:'储量', icon:'grid' }, metals:{ name:'金属', color:'#d97b4f', unit:'储量', icon:'gem' },
+    rareMinerals:{ name:'稀有矿物', color:'#8b7cf6', unit:'储量', icon:'sparkle' }, fuel:{ name:'燃料', color:'#e8a15c', unit:'储量', icon:'flask' },
+    energy:{ name:'能源', color:'#5fd6e6', unit:'能量', icon:'bolt' }, essence:{ name:'灵质', color:'#b880e8', unit:'灵质', icon:'pulses' }
+  };
+  const buildingCatalog = {
+    granary:{ name:'粮仓群', icon:'grid', outputs:{ food:4 }, capacity:{ food:90 } },
+    forge:{ name:'符文锻炉', icon:'gem', outputs:{ metals:4, materials:1 }, capacity:{ metals:60 } },
+    grove:{ name:'根脉庭园', icon:'tree', outputs:{ biomass:3, essence:2 } },
+    port:{ name:'深水港', icon:'ship', outputs:{ food:1, fuel:1 }, capacity:{ fuel:50 } },
+    extractor:{ name:'深层采掘站', icon:'flask', outputs:{ rareMinerals:3, fuel:2 } },
+    reactor:{ name:'聚变反应堆', icon:'bolt', outputs:{ energy:6 }, capacity:{ energy:120 } }
+  };
+
+  /* ---------- 战略地图基线（盖亚；兼容 GE.data.strategicMap 旧引用） ---------- */
   const strategicMap = {
     schemaVersion: 1,
+    id: 'gaiya:surface',
+    bodyId: 'gaiya',
     topology: { kind: 'icosahedron-dual', frequency: 64, seed: 20260723, planetRadiusKm: 6371, nominalTileWidthKm: 120 },
+    climateProfile: { hydrosphere: 0.37, meanTemp: 'temperate', energyAffinity: 0.55 },
     regions: [
       { id:'tian-shu-coast', name:'天枢海岸', color:'#4fd2ff', lat:18, lon:40, radius:30, description:'东部暖流海岸与联邦城邦带。' },
       { id:'jin-hui-plain', name:'金辉平原', color:'#e6a948', lat:4, lon:-10, radius:34, description:'河网密布、铁与麦丰沛的中央平原。' },
@@ -515,30 +558,64 @@ GE.data = (function () {
       { id:'chi-sha-basin', name:'赤沙盆地', color:'#d68b52', lat:-12, lon:80, radius:28, description:'高温干旱的红砂盆地，蕴藏燃料与灵晶。' },
       { id:'xi-yang-isles', name:'西洋群岛', color:'#5fa6c4', lat:12, lon:-150, radius:30, description:'火山岛弧与海上贸易航道。' }
     ],
-    terrainCatalog: {
-      ice:{ name:'冰原', color:'#e6eef6', elevation:'冰盖' }, tundra:{ name:'冻土', color:'#a8b294', elevation:'低地' },
-      desert:{ name:'沙漠', color:'#dcc388', elevation:'盆地' }, plains:{ name:'平原', color:'#86ab6b', elevation:'低地' },
-      forest:{ name:'森林', color:'#4f8458', elevation:'丘陵' }, hills:{ name:'丘陵', color:'#9a9a72', elevation:'高地' },
-      mountain:{ name:'山脉', color:'#8d929c', elevation:'山地' }, coast:{ name:'海岸', color:'#2f6d88', elevation:'海平面' }, ocean:{ name:'海洋', color:'#14304a', elevation:'深海' }
-    },
-    resourceCatalog: {
-      food:{ name:'粮食', color:'#d8b76a', unit:'储量', icon:'wheat' }, biomass:{ name:'生物质', color:'#6fd08c', unit:'储量', icon:'tree' },
-      materials:{ name:'石材建材', color:'#a7a09a', unit:'储量', icon:'grid' }, metals:{ name:'金属', color:'#d97b4f', unit:'储量', icon:'gem' },
-      rareMinerals:{ name:'稀有矿物', color:'#8b7cf6', unit:'储量', icon:'sparkle' }, fuel:{ name:'燃料', color:'#e8a15c', unit:'储量', icon:'flask' },
-      energy:{ name:'能源', color:'#5fd6e6', unit:'能量', icon:'bolt' }, essence:{ name:'灵质', color:'#b880e8', unit:'灵质', icon:'pulses' }
-    },
-    buildingCatalog: {
-      granary:{ name:'粮仓群', icon:'grid', outputs:{ food:4 }, capacity:{ food:90 } },
-      forge:{ name:'符文锻炉', icon:'gem', outputs:{ metals:4, materials:1 }, capacity:{ metals:60 } },
-      grove:{ name:'根脉庭园', icon:'tree', outputs:{ biomass:3, essence:2 } },
-      port:{ name:'深水港', icon:'ship', outputs:{ food:1, fuel:1 }, capacity:{ fuel:50 } },
-      extractor:{ name:'深层采掘站', icon:'flask', outputs:{ rareMinerals:3, fuel:2 } },
-      reactor:{ name:'聚变反应堆', icon:'bolt', outputs:{ energy:6 }, capacity:{ energy:120 } }
-    },
+    terrainCatalog, resourceCatalog, buildingCatalog,
     capitalSeeds: { dawn:{ lat:18, lon:40 }, aurel:{ lat:4, lon:-10 }, sylva:{ lat:-32, lon:130 }, bronze:{ lat:44, lon:-120 }, abyss:{ lat:-58, lon:-60 } },
     claimRadius: { dawn:16, aurel:21, sylva:15, bronze:12, abyss:18 }
   };
 
+  /* ---------- 各 landable 天体的表面定义（SurfaceRegistry 源） ---------- */
+  const bodySurfaces = {
+    'gaiya:surface': strategicMap,
+    'yinhui:surface': {
+      schemaVersion: 1,
+      id: 'yinhui:surface',
+      bodyId: 'yinhui',
+      topology: { kind: 'icosahedron-dual', frequency: 32, seed: 20260724, planetRadiusKm: 1737, nominalTileWidthKm: 80 },
+      climateProfile: { hydrosphere: 0.02, meanTemp: 'cold', energyAffinity: 0.08 },
+      regions: [
+        { id:'yue-hai', name:'静海盆地', color:'#c8ccd8', lat:10, lon:20, radius:40, description:'平坦的玄武岩海，联邦前哨候选址。' },
+        { id:'yue-ji', name:'银冕高地', color:'#a8b0c0', lat:-25, lon:-90, radius:38, description:'撞击坑密布的古老高地。' },
+        { id:'yue-an', name:'永夜极冠', color:'#e8eef6', lat:78, lon:0, radius:42, description:'永久阴影坑，可能藏有水冰。' },
+        { id:'yue-yao', name:'曜斑谷地', color:'#9aa8b8', lat:5, lon:140, radius:36, description:'放射状裂谷与稀有矿物露头。' }
+      ],
+      terrainCatalog, resourceCatalog, buildingCatalog,
+      // 无人殖民：无首都种子 → 全无主；勘察后可落前哨
+      capitalSeeds: {},
+      claimRadius: {}
+    },
+    'yanhe:surface': {
+      schemaVersion: 1,
+      id: 'yanhe:surface',
+      bodyId: 'yanhe',
+      topology: { kind: 'icosahedron-dual', frequency: 32, seed: 20260721, planetRadiusKm: 4880, nominalTileWidthKm: 100 },
+      climateProfile: { hydrosphere: 0.08, meanTemp: 'hot', energyAffinity: 0.15 },
+      regions: [
+        { id:'yan-glass', name:'琉璃荒原', color:'#c98452', lat:0, lon:0, radius:45, description:'被曦阳烤熔又重新固化的玻璃荒漠。' },
+        { id:'yan-rift', name:'焦痕裂谷', color:'#a85a32', lat:30, lon:100, radius:40, description:'深裂谷暴露出下层金属矿脉。' },
+        { id:'yan-shadow', name:'永影盆地', color:'#8a6048', lat:-40, lon:-120, radius:38, description:'极地永夜区，勉强可作庇护所。' },
+        { id:'yan-ridge', name:'熔脊山脉', color:'#d4a070', lat:55, lon:-40, radius:35, description:'火山脊与硫磺喷口。' }
+      ],
+      terrainCatalog, resourceCatalog, buildingCatalog,
+      capitalSeeds: {},
+      claimRadius: {}
+    },
+    'youxing:surface': {
+      schemaVersion: 1,
+      id: 'youxing:surface',
+      bodyId: 'youxing',
+      topology: { kind: 'icosahedron-dual', frequency: 16, seed: 20260720, planetRadiusKm: 1180, nominalTileWidthKm: 90 },
+      climateProfile: { hydrosphere: 0.05, meanTemp: 'frigid', energyAffinity: 0.04 },
+      regions: [
+        { id:'you-core', name:'幽核盆地', color:'#8a90a8', lat:5, lon:30, radius:50, description:'矮行星主盆地，灵能微弱。' },
+        { id:'you-rim', name:'边尘环带', color:'#6a7088', lat:-50, lon:-80, radius:48, description:'稀疏的尘冰沉积带。' }
+      ],
+      terrainCatalog, resourceCatalog, buildingCatalog,
+      capitalSeeds: {},
+      claimRadius: {}
+    }
+  };
+
   return { world, civLevels, energyScale, civs, races, transcendent, favorites,
-           chronicle, thresholds, spaceBodies, relations, legacies, eraCausal, deduction, eras, strategicMap };
+           chronicle, thresholds, spaceBodies, relations, legacies, eraCausal, deduction, eras,
+           strategicMap, bodySurfaces, terrainCatalog, resourceCatalog, buildingCatalog };
 })();

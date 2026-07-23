@@ -200,9 +200,13 @@ GE.views.universe = (function () {
         entry.update = (t, days) => { mat.uniforms.uTime.value = t; entry.mesh.rotation.y = days * 0.008 / Math.max(1, b.radius * 0.2); };
       }
 
-      // 轨道线
+      // 轨道线（母星 / landable 高亮）
       if (b.orbit && b.type !== '卫星' && b.type !== '空间站') {
-        entry.orbitLine = makeOrbitLine(b, b.type === '黑洞' ? 0x8b7cf6 : (b.home ? 0x5fd6e6 : 0x4a5a7a), b.home ? 0.5 : 0.22);
+        const homeish = GE.surfaces ? GE.surfaces.isPlayerHome(b) : !!b.home;
+        const landable = GE.surfaces ? GE.surfaces.isLandable(b) : !!b.home;
+        const col = b.type === '黑洞' ? 0x8b7cf6 : (homeish ? 0x5fd6e6 : landable ? 0x6fd08c : 0x4a5a7a);
+        const op = homeish ? 0.5 : landable ? 0.35 : 0.22;
+        entry.orbitLine = makeOrbitLine(b, col, op);
         view.scene.add(entry.orbitLine);
       }
       // 标签
@@ -318,7 +322,9 @@ GE.views.universe = (function () {
     dom.addEventListener('dblclick', (e) => {
       if (!isActiveView()) return;
       const b = pickBody(e);
-      if (b && b.home) GE.app.switchView('planet');
+      if (b && GE.surfaces && GE.surfaces.isLandable(b)) {
+        GE.app.enterPlanet(b.id);
+      }
     });
   }
   function pickBody(e) {

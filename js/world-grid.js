@@ -1,16 +1,19 @@
 /* ============================================================
    创世引擎 · world-grid.js — 确定性球面战略网格
    以细分二十面体的对偶网格生成全星球共享边地块。
+   支持按 topology 多实例；GE.worldGrid 为「当前激活表面」门面。
    ============================================================ */
 window.GE = window.GE || {};
 
-GE.worldGrid = (function () {
+/** 由 topology 配置创建独立网格实例（不共享 built 缓存）。 */
+GE.createWorldGrid = function createWorldGrid(topology) {
   'use strict';
+  if (!topology) throw new Error('createWorldGrid: topology required');
 
-  const cfg = () => GE.data.strategicMap.topology;
   let built = false;
   let tiles = [];
   let byId = new Map();
+  const cfg = () => topology;
 
   function normalize(v) {
     const d = Math.hypot(v[0], v[1], v[2]) || 1;
@@ -69,6 +72,7 @@ GE.worldGrid = (function () {
       return c;
     });
 
+    const freq = cfg().frequency;
     tiles = verts.map((center, index) => {
       const up = Math.abs(center[1]) > 0.94 ? [1, 0, 0] : [0, 1, 0];
       const tangent = normalize(cross(up, center));
@@ -82,7 +86,7 @@ GE.worldGrid = (function () {
       const lat = Math.asin(center[1]) * 180 / Math.PI;
       const lon = Math.atan2(center[2], center[0]) * 180 / Math.PI;
       return {
-        id: `g${cfg().frequency}-v${String(index).padStart(5, '0')}`,
+        id: `g${freq}-v${String(index).padStart(5, '0')}`,
         index, center, polygon, lat, lon,
         kind: polygon.length === 5 ? 'pentagon' : 'hex',
         neighborIndices: [...neighborSets[index]].sort((a, b) => a - b),
@@ -122,6 +126,7 @@ GE.worldGrid = (function () {
 
   const api = {
     build,
+    get topology() { return topology; },
     get tiles() { build(); return tiles; },
     get byId() { build(); return byId; },
     get config() { return cfg(); },
@@ -131,4 +136,33 @@ GE.worldGrid = (function () {
     validate
   };
   return api;
+};
+
+/** 当前激活表面的网格门面；由 SurfaceRegistry.activate 绑定。 */
+GE.worldGrid = (function () {
+  'use strict';
+  let active = null;
+
+  function requireActive() {
+    if (!active) {
+      // 兜底：尚无注册表时用 strategicMap 拓扑
+      const topo = GE.data && GE.data.strategicMap && GE.data.strategicMap.topology;
+      if (!topo) throw new Error('GE.worldGrid: no active grid');
+      active = GE.createWorldGrid(topo);
+    }
+    return active;
+  }
+
+  return {
+    bind(grid) { active = grid || null; },
+    get active() { return active; },
+    build() { return requireActive().build(); },
+    get tiles() { return requireActive().tiles; },
+    get byId() { return requireActive().byId; },
+    get config() { return requireActive().config; },
+    getTile(id) { return requireActive().getTile(id); },
+    nearestToVector(v) { return requireActive().nearestToVector(v); },
+    nearestLatLon(lat, lon) { return requireActive().nearestLatLon(lat, lon); },
+    validate() { return requireActive().validate(); }
+  };
 })();

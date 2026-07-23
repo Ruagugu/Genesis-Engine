@@ -15,6 +15,8 @@ GE.app = (function () {
 
   const state = {
     view: 'planet',
+    activeBodyId: 'gaiya',
+    activeSurfaceId: null,
     selectedCiv: null,
     playing: true,
     speedIndex: 2,
@@ -66,6 +68,7 @@ GE.app = (function () {
   /* ============ 启动 ============ */
   function boot() {
     decorateIcons();
+    if (GE.surfaces) GE.surfaces.init();
     hydrateWorldStrip();
     renderCivDock();
     bindShell();
@@ -73,7 +76,7 @@ GE.app = (function () {
 
     const stages = [
       ['校验创世契约 …', 18],
-      ['构筑六边形世界地表 …', 42],
+      ['构筑多星球表面注册表 …', 42],
       ['部署星链轨道壳 …', 68],
       ['唤醒文明 Agent …', 86],
       ['世界开始运转', 100]
@@ -91,6 +94,7 @@ GE.app = (function () {
     try {
       initView('planet');
       applyLayers();
+      refreshPlanetHud();
       next();
     } catch (err) {
       console.error('[创世引擎] 初始化失败', err);
@@ -127,8 +131,69 @@ GE.app = (function () {
     document.getElementById('ws-energy-tier').textContent = w.能级档位;
     document.querySelector('#ws-energy-meter i').style.width = Math.min(100, w.能级 / 3.2) + '%';
     document.getElementById('ws-civ-num').textContent = GE.data.civs.length;
-    document.getElementById('ws-planet-name').textContent = w.母星名;
     document.getElementById('dock-count').textContent = GE.data.civs.length;
+    refreshPlanetHud();
+  }
+
+  function activeBody() {
+    const id = state.activeBodyId || (GE.surfaces && GE.surfaces.activeBodyId) || 'gaiya';
+    return (GE.data.spaceBodies || []).find(b => b.id === id) || null;
+  }
+
+  function refreshPlanetHud() {
+    const body = activeBody();
+    const nameEl = document.getElementById('ws-planet-name');
+    const roleEl = document.getElementById('ws-planet-role');
+    if (!nameEl) return;
+    if (body) {
+      nameEl.textContent = body.name;
+      const home = GE.surfaces ? GE.surfaces.isPlayerHome(body) : !!body.home;
+      if (roleEl) roleEl.textContent = home ? '母星' : (body.type || '星球');
+      const tip = document.getElementById('ws-planet');
+      if (tip) tip.dataset.tip = home ? '母星 · 点击定位' : (body.name + ' · 点击定位');
+    } else {
+      nameEl.textContent = GE.data.world.母星名;
+      if (roleEl) roleEl.textContent = '母星';
+    }
+  }
+
+  /**
+   * 进入任意 landable 天体的星球视图。
+   * @param {string} bodyId
+   * @param {{ silent?: boolean }} opts
+   */
+  function enterPlanet(bodyId, opts) {
+    opts = opts || {};
+    const body = (GE.data.spaceBodies || []).find(b => b.id === bodyId);
+    if (!body) {
+      GE.toast.warn('未知天体', bodyId);
+      return;
+    }
+    if (GE.surfaces && !GE.surfaces.isLandable(body)) {
+      GE.toast.info('不可登陆', body.name + ' 暂无星球地图（气态体 / 恒星 / 站等）。');
+      return;
+    }
+    try {
+      if (GE.surfaces) GE.surfaces.activate(bodyId);
+      state.activeBodyId = bodyId;
+      state.activeSurfaceId = GE.surfaces ? GE.surfaces.activeSurfaceId : null;
+      if (state.initialized.planet && GE.views.planet.loadSurface) {
+        GE.views.planet.loadSurface(bodyId, { silent: opts.silent });
+      }
+      switchView('planet', { silent: opts.silent });
+      refreshPlanetHud();
+      if (!opts.silent) {
+        const home = GE.surfaces && GE.surfaces.isPlayerHome(body);
+        GE.toast.show({
+          type: 'info', icon: 'globe',
+          title: home ? '抵达母星 · ' + body.name : '登陆 · ' + body.name,
+          msg: home ? '战略网格与文明疆域已就绪。' : '已载入独立表面网格；仓储与盖亚互不串写。'
+        });
+      }
+    } catch (err) {
+      console.error('[创世引擎] enterPlanet', err);
+      GE.toast.critical('登陆失败', err.message || String(err));
+    }
   }
 
   function renderCivDock() {
@@ -307,7 +372,7 @@ GE.app = (function () {
     document.getElementById('ws-energy').addEventListener('click', () => GE.panels.openCodex('scale'));
     document.getElementById('ws-civs').addEventListener('click', () => GE.panels.openWorld());
     document.getElementById('ws-planet').addEventListener('click', () => {
-      switchView('planet', { silent: true });
+      enterPlanet(state.activeBodyId || 'gaiya', { silent: true });
       if (GE.views.planet._built) GE.views.planet.focusHome();
     });
 
@@ -423,24 +488,34 @@ GE.app = (function () {
 
   function showTileContext(tileId) {
     const tile = GE.worldState.getTile(tileId); if (!tile) return;
-    const map = GE.data.strategicMap, terrain = map.terrainCatalog[tile.terrain], region = GE.worldState.getRegion(tile.regionId);
+    const map = GE.worldState.def || GE.data.strategicMap;
+    const terrain = (map.terrainCatalog || GE.data.terrainCatalog)[tile.terrain] || { name: tile.terrain };
+    const region = GE.worldState.getRegion(tile.regionId);
     const civ = tile.ownerCivId && GE.data.civs.find(c => c.id === tile.ownerCivId);
-    const rows = tile.resources.map(r => `${map.resourceCatalog[r.resourceId].name} · 丰度 ${r.richness}`).join('<br>') || '无显著产出';
-    ctxInner.innerHTML = `<header class="ctx-head" style="--ctx-c:${region.color}"><button class="ctx-close" id="ctx-close-tile" aria-label="关闭详情">${GE.icons.icon('x',14)}</button><div class="ctx-kicker">${GE.icons.icon('hex',12)}战略地块 · ${tile.kind === 'pentagon' ? '五边' : '六边'}</div><div class="ctx-title">${terrain.name}</div><div class="ctx-sub">${tile.id} · 约 ${map.topology.nominalTileWidthKm} km</div></header><div class="ctx-body"><div class="ctx-stats"><div class="ctx-stat"><div class="cs-num">${tile.neighbors.length}</div><div class="cs-label">相邻地块</div></div><div class="ctx-stat"><div class="cs-num">${tile.buildings.length}</div><div class="cs-label">建筑</div></div><div class="ctx-stat"><div class="cs-num">${tile.resources.length}</div><div class="cs-label">资源</div></div></div><div class="panel"><div class="kv"><span class="k">地区</span><span class="v" style="color:${region.color}">${region.name}</span></div><div class="kv"><span class="k">归属</span><span class="v">${civ ? civ.name : '无主'}</span></div><div class="kv"><span class="k">状态</span><span class="v">${tile.status}</span></div><div class="kv"><span class="k">产出</span><span class="v">${rows}</span></div></div></div><div class="ctx-actions"><button class="btn" id="ctx-region">地区</button>${civ ? `<button class="btn btn-gold" id="ctx-warehouse">国家仓储</button>` : ''}</div>`;
+    const resCat = map.resourceCatalog || GE.data.resourceCatalog;
+    const rows = tile.resources.map(r => `${(resCat[r.resourceId] || {}).name || r.resourceId} · 丰度 ${r.richness}`).join('<br>') || '无显著产出';
+    const regionColor = region ? region.color : '#8aa';
+    const regionName = region ? region.name : '未知';
+    ctxInner.innerHTML = `<header class="ctx-head" style="--ctx-c:${regionColor}"><button class="ctx-close" id="ctx-close-tile" aria-label="关闭详情">${GE.icons.icon('x',14)}</button><div class="ctx-kicker">${GE.icons.icon('hex',12)}战略地块 · ${tile.kind === 'pentagon' ? '五边' : '六边'}</div><div class="ctx-title">${terrain.name}</div><div class="ctx-sub">${tile.id} · 约 ${map.topology.nominalTileWidthKm} km</div></header><div class="ctx-body"><div class="ctx-stats"><div class="ctx-stat"><div class="cs-num">${tile.neighbors.length}</div><div class="cs-label">相邻地块</div></div><div class="ctx-stat"><div class="cs-num">${tile.buildings.length}</div><div class="cs-label">建筑</div></div><div class="ctx-stat"><div class="cs-num">${tile.resources.length}</div><div class="cs-label">资源</div></div></div><div class="panel"><div class="kv"><span class="k">地区</span><span class="v" style="color:${regionColor}">${regionName}</span></div><div class="kv"><span class="k">归属</span><span class="v">${civ ? civ.name : '无主'}</span></div><div class="kv"><span class="k">状态</span><span class="v">${tile.status}</span></div><div class="kv"><span class="k">产出</span><span class="v">${rows}</span></div></div></div><div class="ctx-actions"><button class="btn" id="ctx-region">地区</button>${civ ? `<button class="btn btn-gold" id="ctx-warehouse">国家仓储</button>` : ''}</div>`;
     ctxPanel.hidden=false; ctxInner.querySelector('#ctx-close-tile').addEventListener('click',clearSelection);
-    ctxInner.querySelector('#ctx-region').addEventListener('click',()=>GE.panels.openRegion(region.id));
+    ctxInner.querySelector('#ctx-region').addEventListener('click',()=>{ if (region) GE.panels.openRegion(region.id); });
     const wh=ctxInner.querySelector('#ctx-warehouse'); if(wh) wh.addEventListener('click',()=>GE.panels.openWarehouse(civ.id));
   }
 
   function showBodyCard(body) {
     const typeIcon = body.type === '恒星' ? 'sun' : body.type === '卫星' ? 'moon' : body.type === '空间站' ? 'station' : body.type === '黑洞' ? 'blackhole' : 'globe';
     const orbit = body.orbit;
+    const landable = GE.surfaces ? GE.surfaces.isLandable(body) : !!body.home;
+    const home = GE.surfaces ? GE.surfaces.isPlayerHome(body) : !!body.home;
+    const survey = (body.flags && body.flags.surveyed) || 'none';
+    const roleLabel = home ? '文明母星' : landable ? ('可登陆 · 勘察 ' + survey) : '自动星轨运行中';
+    const enterLabel = home ? '进入星球' : (survey === 'surface' || survey === 'orbital' ? '登陆表面' : '勘察登陆');
     ctxInner.innerHTML = `
       <header class="ctx-head" style="--ctx-c:${body.color || '#d8b76a'}">
         <button class="ctx-close" id="ctx-close-body" aria-label="关闭详情">${GE.icons.icon('x', 14)}</button>
         <div class="ctx-kicker">${GE.icons.icon(typeIcon, 12)}${GE.esc(body.type)} · ${GE.esc(body.subtype || '')}</div>
         <div class="ctx-title">${GE.esc(body.name)}</div>
-        <div class="ctx-sub">曦阳星系 · ${body.home ? '文明母星' : '自动星轨运行中'}</div>
+        <div class="ctx-sub">曦阳星系 · ${GE.esc(roleLabel)}</div>
       </header>
       <div class="ctx-body">
         <div class="panel"><p class="prose">${GE.esc(body.desc || '暂无天体资料。')}</p></div>
@@ -453,14 +528,14 @@ GE.app = (function () {
         </div>` : ''}
       </div>
       <div class="ctx-actions">
-        ${body.home ? `<button class="btn btn-cyan" id="ctx-enter-planet">${GE.icons.icon('globe', 14)}进入星球</button>` : ''}
+        ${landable ? `<button class="btn btn-cyan" id="ctx-enter-planet">${GE.icons.icon('globe', 14)}${GE.esc(enterLabel)}</button>` : ''}
         ${body.type === '黑洞' ? `<button class="btn btn-gold" id="ctx-enter-bh">${GE.icons.icon('blackhole', 14)}观测黑洞</button>` : ''}
         <button class="btn" id="ctx-focus-body">${GE.icons.icon('target', 14)}锁定</button>
       </div>`;
     ctxPanel.hidden = false;
     ctxInner.querySelector('#ctx-close-body').addEventListener('click', clearSelection);
     const ep = ctxInner.querySelector('#ctx-enter-planet');
-    if (ep) ep.addEventListener('click', () => switchView('planet'));
+    if (ep) ep.addEventListener('click', () => enterPlanet(body.id));
     const eb = ctxInner.querySelector('#ctx-enter-bh');
     if (eb) eb.addEventListener('click', () => switchView('blackhole'));
     ctxInner.querySelector('#ctx-focus-body').addEventListener('click', () => GE.views.universe.focusBody(body.id));
@@ -554,6 +629,8 @@ GE.app = (function () {
   return {
     boot,
     switchView,
+    enterPlanet,
+    refreshPlanetHud,
     selectCiv,
     clearSelection,
     showCivContext,

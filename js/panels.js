@@ -271,7 +271,13 @@ GE.panels = (function () {
   function renderCivRealm(el, c) {
     const summary = GE.worldState.getCivSummary(c.id);
     const orbital = c.orbital;
-    const regionNames = summary.regions.map(id => GE.worldState.getRegion(id).name).join('、') || '无';
+    const resCat = ((GE.worldState && GE.worldState.def) || GE.data.strategicMap).resourceCatalog;
+    const regionNames = summary.regions.map(id => {
+      const r = GE.worldState.getRegion(id);
+      return r ? r.name : id;
+    }).join('、') || '无';
+    const topOut = Object.entries(summary.output).sort((a,b)=>b[1]-a[1]).slice(0,3)
+      .map(([id,v]) => ((resCat[id] && resCat[id].name) || id) + ' ' + v).join(' · ') || '无';
     el.innerHTML = `
       ${secHead('hex', '地表疆域', c.capital)}
       <div class="card-grid cols-3">
@@ -279,18 +285,28 @@ GE.panels = (function () {
         ${bigstat('≈' + GE.fmt.compact(summary.areaKm2), '疆域 · km²', 'globe', c.color)}
         ${bigstat(summary.buildings.length, '运行建筑', 'grid', c.color)}
       </div>
-      <div class="panel" style="margin-top:12px">${kv('覆盖地区', esc(regionNames))}${kv('主要产出', esc(Object.entries(summary.output).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([id,v])=>GE.data.strategicMap.resourceCatalog[id].name+' '+v).join(' · ') || '无'))}</div>
+      <div class="panel" style="margin-top:12px">${kv('覆盖地区', esc(regionNames))}${kv('主要产出', esc(topOut))}</div>
       <div style="margin-top:12px"><button class="btn btn-gold" id="btn-open-warehouse">${ic('grid',14)}国家仓储</button><button class="btn" id="btn-focus-capital" style="margin-left:8px">${ic('target',14)}定位首都</button></div>
       ${orbital ? secHead('satellite', '轨道资产', c.name) + `<div class="card-grid cols-3">${bigstat(orbital.satellites, '星链卫星', 'satellite', '#5fd6e6')}${bigstat(1, '轨道站', 'station', '#5fd6e6')}${bigstat(orbital.ships, '在轨舰船', 'ship', '#5fd6e6')}</div>` : ''}
       <div class="panel" style="margin-top:14px;border-left:3px solid ${c.color}"><div style="font-size:11px;color:var(--tx-2);margin-bottom:4px">领土策略</div><p class="prose">${esc(c.发展计划)}</p></div>`;
     el.querySelector('#btn-open-warehouse').addEventListener('click', () => openWarehouse(c.id));
-    el.querySelector('#btn-focus-capital').addEventListener('click', () => { GE.modal.close(); GE.app.switchView('planet'); GE.views.planet.focusCapital(c.id); });
+    el.querySelector('#btn-focus-capital').addEventListener('click', () => {
+      GE.modal.close();
+      if (GE.app.enterPlanet) GE.app.enterPlanet((GE.app.state && GE.app.state.activeBodyId) || 'gaiya', { silent: true });
+      else GE.app.switchView('planet');
+      GE.views.planet.focusCapital(c.id);
+    });
   }
 
   function renderWarehouse(el, c) {
-    const warehouse = GE.worldState.getWarehouse(c.id), catalog = GE.data.strategicMap.resourceCatalog;
+    const warehouse = GE.worldState.getWarehouse(c.id);
+    const catalog = ((GE.worldState && GE.worldState.def) || GE.data.strategicMap).resourceCatalog;
+    if (!warehouse) {
+      el.innerHTML = `${secHead('grid', '国家仓储', '战略资源流')}<div class="panel"><p class="prose">当前表面（${esc((GE.worldState && GE.worldState.bodyId) || '—')}）尚无该文明的行星仓储。请切换至有其领地的星球，或等待殖民后建立前哨。</p></div>`;
+      return;
+    }
     el.innerHTML = `${secHead('grid', '国家仓储', '战略资源流')}
-      <div class="panel" style="margin-bottom:14px"><p class="prose" style="font-size:12px">库存由受控战略地块的资源与建筑产出汇总；推演后将更新本轮产出、消耗与净变化。</p></div>
+      <div class="panel" style="margin-bottom:14px"><p class="prose" style="font-size:12px">库存由受控战略地块的资源与建筑产出汇总；推演后将更新本轮产出、消耗与净变化。键：${esc(GE.worldState.surfaceId || 'default')}</p></div>
       <div class="stagger">${Object.entries(catalog).map(([id,r]) => { const stock=warehouse.stock[id], cap=warehouse.capacity[id], net=warehouse.lastTurn.net[id] || 0, pct=Math.round(stock/cap*100); return `<div class="warehouse-row"><div class="wr-head"><span style="color:${r.color};font-weight:700">${esc(r.name)}</span><span class="mono">${stock} / ${cap}</span><span class="wr-net ${net>=0?'up':'down'}">${net>=0?'+':''}${net}</span></div><div class="meter"><i style="--m-color:${r.color};width:${pct}%"></i></div><div class="wr-meta">产出 ${warehouse.lastTurn.produced[id] || 0} · 消耗 ${warehouse.lastTurn.consumed[id] || 0} · ${pct < 25 ? '低储备警告' : pct > 92 ? '接近容量' : '储备稳定'}</div></div>`; }).join('')}</div>`;
   }
 
@@ -425,18 +441,30 @@ GE.panels = (function () {
 
   function openPlanetInfo() {
     const w = D().world;
+    const bodyId = (GE.app && GE.app.state && GE.app.state.activeBodyId) || 'gaiya';
+    const body = (D().spaceBodies || []).find(b => b.id === bodyId) || { id: 'gaiya', name: w.母星名, type: '类地行星', color: '#4fa8e0', desc: '' };
+    const home = GE.surfaces ? GE.surfaces.isPlayerHome(body) : !!body.home;
+    const def = (GE.worldState && GE.worldState.def) || D().strategicMap;
+    const tileCount = GE.worldState ? GE.worldState.tiles.length : 0;
+    const owned = GE.worldState ? GE.worldState.tiles.filter(t => t.ownerCivId).length : 0;
+    const subtitle = home
+      ? (body.type + ' · 文明的摇篮')
+      : (body.type + (body.subtype ? ' · ' + body.subtype : '') + ' · 独立表面');
+    const overview = home
+      ? `${esc(body.name)}是曦阳星系宜居带中的一颗蔚蓝行星，灵能随恒星耀斑周期涨落。其地表被划分为六边形地块，由 ${D().civs.length} 个文明分据；近地轨道之上，晨曦联邦的星链之壳正缓缓旋转。`
+      : `${esc(body.name)}（${esc(body.type)}）已载入独立战略表面。网格 frequency=${def.topology.frequency}，种子 ${def.topology.seed}；当前 ${tileCount} 块地块中 ${owned} 块有归属。${esc(body.desc || '')}`;
     GE.modal.open({
-      id: 'planet-info', title: w.母星名, subtitle: '类地行星 · 文明的摇篮',
-      icon: 'globe', accent: '#4fa8e0', size: 'lg',
+      id: 'planet-info', title: body.name, subtitle,
+      icon: 'globe', accent: body.color || '#4fa8e0', size: 'lg',
       body: `
         <div class="card-grid cols-3" style="margin-bottom:16px">
-          ${bigstat(D().civs.length, '活跃文明', 'flag', '#4fa8e0')}
-          ${bigstat(GE.fmt.compact(D().civs.reduce((s, c) => s + c.stats.人口, 0) * 1e6), '总人口', 'users', '#4fa8e0')}
+          ${bigstat(home ? D().civs.length : owned, home ? '活跃文明' : '有主地块', 'flag', body.color || '#4fa8e0')}
+          ${bigstat(GE.fmt.compact(tileCount), '战略地块', 'hex', body.color || '#4fa8e0')}
           ${bigstat(w.能级, '世界能级', 'bolt', '#8b7cf6')}
         </div>
         ${secHead('globe', '星球概况')}
-        <div class="panel"><p class="prose">${esc(w.母星名)}是曦阳星系宜居带中的一颗蔚蓝行星，灵能随恒星耀斑周期涨落。其地表被划分为六边形地块，由 ${D().civs.length} 个文明分据；近地轨道之上，晨曦联邦的星链之壳正缓缓旋转。</p></div>
-        ${secHead('flag', '地表文明')}
+        <div class="panel"><p class="prose">${overview}</p></div>
+        ${home ? `${secHead('flag', '地表文明')}
         ${D().civs.map(c => `
           <div class="rel-chip" style="margin-bottom:8px;cursor:pointer" data-civ="${c.id}">
             <i style="width:10px;height:10px;border-radius:99px;background:${c.color};box-shadow:0 0 6px ${c.color}"></i>
@@ -444,11 +472,16 @@ GE.panels = (function () {
             <span class="dot-sep"></span><span class="tx2">${esc(c.社会形态)}</span>
             <span style="flex:1"></span>
             <span class="badge" style="border-color:${c.color}55;color:${c.color}">${c.level} 级</span>
-          </div>`).join('')}
+          </div>`).join('')}` : `${secHead('radar', '勘察状态')}
+        <div class="panel">
+          <div class="kv"><span class="k">表面 ID</span><span class="v mono">${esc(def.id || body.surfaceId || '—')}</span></div>
+          <div class="kv"><span class="k">勘察等级</span><span class="v">${esc((body.flags && body.flags.surveyed) || 'remote')}</span></div>
+          <div class="kv"><span class="k">殖民</span><span class="v">${(body.flags && body.flags.colonized) ? '是' : '否'}</span></div>
+        </div>`}
         <div style="margin-top:12px"><button class="btn btn-cyan" id="pi-universe">${ic('universe', 14)}在宇宙中查看</button></div>`,
-      onOpen: (body) => {
-        body.querySelectorAll('[data-civ]').forEach(el => el.addEventListener('click', () => openCiv(el.dataset.civ)));
-        body.querySelector('#pi-universe').addEventListener('click', () => { GE.modal.close(); GE.app.switchView('universe'); GE.views.universe.focusBody('gaiya'); });
+      onOpen: (bodyEl) => {
+        bodyEl.querySelectorAll('[data-civ]').forEach(el => el.addEventListener('click', () => openCiv(el.dataset.civ)));
+        bodyEl.querySelector('#pi-universe').addEventListener('click', () => { GE.modal.close(); GE.app.switchView('universe'); GE.views.universe.focusBody(body.id); });
       }
     });
   }
