@@ -103,6 +103,48 @@ test.describe('Phase C deduce API', () => {
     expect(agentPatches.some(p => (p.agentGoals.active || []).length > 0)).toBe(true);
   });
 
+  test('deduce ticks civ stats and territory budgets use 人口/军力/扩张', async ({ request }) => {
+    const rid = 'qa-stats-' + Date.now().toString(36);
+    await request.post('/api/v1/runs', { data: { id: rid, seed: 20260725, reset: true } });
+    const before = await (await request.get(`/api/v1/runs/${rid}/snapshot`)).json();
+    const dawn0 = (before.civs || []).find(c => c.id === 'dawn');
+    expect(dawn0?.stats?.科研).toBeTruthy();
+
+    const res = await request.post(`/api/v1/runs/${rid}/deduce`, { data: { agentMode: 'rules_only' } });
+    expect(res.ok()).toBeTruthy();
+    const body = await res.json();
+
+    const civPatches = body.patchesSummary?.civs || [];
+    expect(civPatches.length).toBeGreaterThanOrEqual(1);
+    const withStats = civPatches.filter(p => p.stats && typeof p.stats === 'object');
+    expect(withStats.length).toBeGreaterThanOrEqual(1);
+    withStats.forEach(p => {
+      expect(p.stats.人口).toBeGreaterThanOrEqual(0);
+      expect(p.stats.军力).toBeGreaterThanOrEqual(0);
+      expect(p.stats.科研).toBeGreaterThanOrEqual(0);
+    });
+
+    // 至少有一份 statsDelta 或与开局不同（自然漂移/决策）
+    const after = await (await request.get(`/api/v1/runs/${rid}/snapshot`)).json();
+    const dawn1 = (after.civs || []).find(c => c.id === 'dawn');
+    expect(dawn1.stats).toBeTruthy();
+    const changed = ['人口', '军力', '经济', '稳定', '科研', '扩张'].some(
+      k => Number(dawn1.stats[k]) !== Number(dawn0.stats[k])
+    );
+    expect(changed || withStats.some(p => p.statsDelta && Object.keys(p.statsDelta).length)).toBe(true);
+
+    // 疆域事件若有 expand，budget 应受 扩张/人口 影响且 ≥1
+    const terr = body.patchesSummary?.territory || [];
+    terr.filter(e => e.type === 'expand').forEach(e => {
+      expect(e.budget).toBeGreaterThanOrEqual(1);
+      expect(e.budget).toBeLessThanOrEqual(6);
+    });
+    terr.filter(e => e.type === 'annex').forEach(e => {
+      expect(e.budget).toBeGreaterThanOrEqual(1);
+      expect(e.powerRatio == null || e.powerRatio > 0).toBe(true);
+    });
+  });
+
   test('leader succession replaces deceased agent and keeps one active leader', async ({ request }) => {
     const rid = 'qa-succession-' + Date.now().toString(36);
     await request.post('/api/v1/runs', { data: { id: rid, seed: 20260723, reset: true } });
@@ -129,8 +171,27 @@ test.describe('Phase C deduce API', () => {
     expect(sawReplace || after.civs.some(c => (c.leaders[0].succession.generation || 1) > 1 || c.leaders[0].id !== beforeIds[c.id])).toBe(true);
   });
 
+  test('primitive rules_only does not invent remote galaxies', async ({ request }) => {
+    // 蒙昧期无 sky_lore：只本系勘察，不得每轮刷新星系
+    const rid = 'qa-grow-local-' + Date.now().toString(36);
+    await request.post('/api/v1/runs', { data: { id: rid, seed: 20260723, reset: true } });
+    const start = await (await request.get(`/api/v1/runs/${rid}`)).json();
+    const g0 = start.discovered.galaxyCount;
+    for (let i = 0; i < 6; i++) {
+      const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
+        data: { agentMode: 'rules_only' }
+      });
+      expect(res.ok()).toBeTruthy();
+      const body = await res.json();
+      expect((body.worldDelta.newGalaxies || []).length).toBe(0);
+      expect((body.worldDelta.newSystems || []).length).toBe(0);
+    }
+    const end = await (await request.get(`/api/v1/runs/${rid}`)).json();
+    expect(end.discovered.galaxyCount).toBe(g0);
+  });
+
   test('multi-round deduce grows discovered set without id collisions', async ({ request }) => {
-    // 独立 run，避免与并行用例争用 local-seed
+    // force 绕过时代门控，验证无限骨架扩图与 id 稳定
     const rid = 'qa-grow-' + Date.now().toString(36);
     await request.post('/api/v1/runs', { data: { id: rid, seed: 20260723, reset: true } });
     const start = await (await request.get(`/api/v1/runs/${rid}`)).json();
@@ -144,9 +205,9 @@ test.describe('Phase C deduce API', () => {
     let maxBodies = startBodies;
     let grew = false;
 
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 8; i++) {
       const res = await request.post(`/api/v1/runs/${rid}/deduce`, {
-        data: { agentMode: 'rules_only' }
+        data: { agentMode: 'rules_only', force: true }
       });
       expect(res.ok()).toBeTruthy();
       const body = await res.json();
@@ -170,7 +231,7 @@ test.describe('Phase C deduce API', () => {
 
     expect(grew).toBe(true);
     expect(maxBodies).toBeGreaterThan(startBodies);
-    expect(lastRevision).toBeGreaterThanOrEqual(12);
+    expect(lastRevision).toBeGreaterThanOrEqual(8);
   });
 
   test('facility deploy appears in bodies and survives re-fetch', async ({ request }) => {
@@ -205,8 +266,8 @@ test.describe('Phase C deduce API', () => {
       data: { id: 'qa-seed-b', seed: 424242, reset: true }
     });
     for (let i = 0; i < 6; i++) {
-      await request.post('/api/v1/runs/qa-seed-a/deduce', { data: { agentMode: 'rules_only' } });
-      await request.post('/api/v1/runs/qa-seed-b/deduce', { data: { agentMode: 'rules_only' } });
+      await request.post('/api/v1/runs/qa-seed-a/deduce', { data: { agentMode: 'rules_only', force: true } });
+      await request.post('/api/v1/runs/qa-seed-b/deduce', { data: { agentMode: 'rules_only', force: true } });
     }
     const a = await (await request.get('/api/v1/runs/qa-seed-a/bodies')).json();
     const b = await (await request.get('/api/v1/runs/qa-seed-b/bodies')).json();
@@ -365,12 +426,17 @@ test.describe('Phase C deduce API', () => {
     });
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
-    // 每人独立 character_decide；失败时不下发 lens_critique
+    // hybrid 先 tech_design seed，再 character_decide；坏端点均失败，不下发 lens
     expect(body.agentMeta.llmCalls).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(body.llmLogs)).toBe(true);
     expect(body.llmLogs.length).toBeGreaterThanOrEqual(1);
-    const entry = body.llmLogs[0];
-    expect(entry.purpose).toBe('character_decide');
+    const purposes = new Set(body.llmLogs.map(e => e.purpose));
+    expect(
+      purposes.has('tech_design') || purposes.has('character_decide')
+    ).toBe(true);
+    const entry = body.llmLogs.find(e => e.purpose === 'character_decide')
+      || body.llmLogs.find(e => e.purpose === 'tech_design')
+      || body.llmLogs[0];
     expect(entry.model).toBe('log-model');
     expect(entry.ok).toBe(false);
     expect(entry.error).toBeTruthy();

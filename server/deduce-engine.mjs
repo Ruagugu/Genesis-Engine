@@ -16,6 +16,23 @@ import {
 import { clone, touch } from './run-store.mjs';
 import { chat as llmChat, parseJsonLoose, llmConfigured } from './llm-provider.mjs';
 import * as llmLog from './llm-log.mjs';
+import {
+  ensureTechTree,
+  ensureCivStats,
+  ideologyBiasForKind,
+  techReadinessForKind,
+  civHasCapability,
+  tickTechProgress,
+  tickCivStats,
+  tickPolicyYears,
+  mergeCivPatches,
+  queueTechSeedsIfEmpty,
+  queueAfterUnlocks,
+  queueOpenResearch,
+  queueIdeologyJobs
+} from './tech-ideology.mjs';
+import { flushDesignQueue } from './civ-design-llm.mjs';
+import { drainEdicts } from './oracle-service.mjs';
 
 const LENS_KEYS = ['政治', '军事', '经济', '科技', '思潮', '个人'];
 
@@ -163,21 +180,37 @@ function actionTypeForDecision(kind) {
   return 'stabilize_internal';
 }
 
-function actionCostFor(type) {
-  const costs = {
-    reserve_resource: { 经济: 8, 稳定: 4 },
-    boost_research: { 科研: 8, 经济: 4 },
-    improve_relation: { 稳定: 5, 经济: 3 },
-    threaten: { 军力: 10, 稳定: 4 },
-    prepare_defense: { 军力: 8, 经济: 4 },
-    annex_border: { 军力: 9, 扩张: 5 },
-    expand_frontier: { 扩张: 7, 经济: 5 },
-    expand_softly: { 扩张: 8, 经济: 6 },
-    stabilize_internal: { 稳定: 8 },
-    prepare_successor: { 稳定: 7 },
-    prepare_secession: { 稳定: 6 }
+/**
+ * 行动门槛按文明时代缩放。
+ * 原始 stats 约 人口1/军力4/经济3/稳定28/科研2/扩张5~10，
+ * 旧硬门槛（科研8/扩张8）会让几乎所有行动 blocked，stats 形同虚设。
+ */
+function actionCostFor(type, civ) {
+  ensureCivStats(civ);
+  const level = Number(civ && civ.科技树 && civ.科技树.文明等级) || Number(civ && civ.level) || 0;
+  // 原始/部落：门槛贴近当前数值；星际后抬高
+  const scale = level <= 0 ? 0.35 : level === 1 ? 0.55 : level === 2 ? 0.8 : 1;
+  const raw = {
+    reserve_resource: { 经济: 6, 稳定: 3 },
+    boost_research: { 科研: 2, 经济: 2 },
+    improve_relation: { 稳定: 4, 经济: 2 },
+    threaten: { 军力: 5, 稳定: 3 },
+    prepare_defense: { 军力: 4, 经济: 2 },
+    annex_border: { 军力: 5, 扩张: 3 },
+    expand_frontier: { 扩张: 4, 经济: 2 },
+    expand_softly: { 扩张: 3, 经济: 2 },
+    stabilize_internal: { 稳定: 5 },
+    prepare_successor: { 稳定: 5 },
+    prepare_secession: { 稳定: 4 }
   };
-  return Object.assign({}, costs[type] || {});
+  const base = raw[type] || {};
+  const out = {};
+  Object.keys(base).forEach(k => {
+    // 至少 1；稳定门槛用较高 floor 避免原始文明被稳定卡死
+    const floor = k === '稳定' ? 4 : 1;
+    out[k] = Math.max(floor, Math.round(base[k] * scale));
+  });
+  return out;
 }
 
 function goalBias(leader, kind) {
@@ -205,16 +238,64 @@ function topGoalForKind(leader, kind) {
     .sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0))[0] || null;
 }
 
+/**
+ * 探测可达深度（程序门控，与时代气质对齐）
+ * - local：只勘察已知天体（explore.body）
+ * - near：可写邻域星系 stub / skeleton
+ * - deep：可 detailed 展开新系
+ */
+function exploreReachOf(civ, bypass) {
+  if (bypass) return 'deep';
+  ensureTechTree(civ);
+  const level = Number(civ.科技树?.文明等级) || 0;
+  if (level >= 2 || civHasCapability(civ, 'orbit_craft')) return 'deep';
+  if (level >= 1 || civHasCapability(civ, 'sky_lore')) return 'near';
+  return 'local';
+}
+
 function chooseLeaderAction(run, civ, leader, kind, rnd) {
   const type = actionTypeForDecision(kind);
-  const cost = actionCostFor(type);
-  const stats = civ.stats || {};
+  const cost = actionCostFor(type, civ);
+  const stats = ensureCivStats(civ);
+  // 人口作为军力/扩张类行动的软门槛：极稀少人口难以发动吞并与大规模开拓
   const missing = Object.keys(cost).filter(k => (Number(stats[k]) || 0) < cost[k]);
+  if (
+    (type === 'annex_border' || type === 'threaten')
+    && (Number(stats.人口) || 0) < 1
+    && !missing.includes('人口')
+  ) {
+    missing.push('人口');
+  }
   let result = 'applied';
   let reason = '目标与文明能力允许行动落地';
   let finalType = type;
-  if (missing.length) {
-    if (type === 'expand_softly' && (Number(stats.经济) || 0) >= 4) {
+  ensureTechTree(civ);
+  const bypass = !!(leader && leader._forceBypassTech);
+  const reach = exploreReachOf(civ, bypass);
+  // 科技能力门槛：原始时代默认无法登天建站（force 调试可 bypass）
+  if ((kind === 'station.build' || kind === 'facility.deploy')
+      && !civHasCapability(civ, 'orbit_craft')
+      && (Number(civ.科技树?.文明等级) || 0) < 1
+      && !bypass) {
+    result = 'blocked';
+    reason = '尚无登天与轨道工程手段（缺 orbit_craft / 文明等级不足）';
+  } else if ((kind === 'galaxy.probe' || kind === 'explore.system') && reach === 'local') {
+    // 蒙昧期：深空探测降为本系勘察，避免「部落每七年发现一个星系」
+    finalType = 'expand_softly';
+    result = 'downgraded';
+    reason = '尚无体系化观星/航程知识，改为勘察已知天体与邻近地貌';
+  } else if (kind === 'galaxy.probe' && reach === 'near') {
+    finalType = 'expand_softly';
+    result = 'downgraded';
+    reason = '远距探针未成熟，改为邻域有限航程';
+  }
+  if (result === 'applied' && missing.length) {
+    // 探测类：资源不足降级意图，不硬堵叙述；真正扩图仍由 worldBuilder 按 reach 门控
+    if (EXPLORE_ACTIONS.includes(kind) || type === 'expand_softly') {
+      finalType = 'reserve_resource';
+      result = 'downgraded';
+      reason = `扩张储备不足，探测仍记录意图：${missing.join('、')}`;
+    } else if (type === 'expand_softly' && (Number(stats.经济) || 0) >= 4) {
       finalType = 'reserve_resource';
       result = 'downgraded';
       reason = `扩张条件不足，转为积蓄资源：${missing.join('、')}`;
@@ -257,10 +338,12 @@ function roleTemplates(role, stance) {
   const r = String(role || '');
   if (/领袖/.test(r)) {
     return [
-      { kind: 'policy', text: '调整国策节奏，巩固内部共识', weight: 1.1 },
-      { kind: 'diplomacy', text: '试探邻邦意图，重估盟约边界', weight: 0.9 },
-      { kind: 'explore.system', text: '批准邻域深空探测授权', weight: 0.75 },
-      { kind: 'station.build', text: '批准新建轨道前哨以固化制空权', weight: 0.55 }
+      { kind: 'policy', text: '调整国策节奏，巩固内部共识', weight: 1.05 },
+      { kind: 'diplomacy', text: '试探邻邦意图，重估盟约边界', weight: 0.85 },
+      // 本系勘察优先；远距探测权重压低，真正扩图靠 sky_lore / 等级门控
+      { kind: 'explore.body', text: '组织对已知天体与沿海地貌的勘察', weight: 0.8 },
+      { kind: 'explore.system', text: '批准邻域深空探测授权', weight: 0.45 },
+      { kind: 'station.build', text: '批准新建轨道前哨以固化制空权', weight: 0.45 }
     ];
   }
   if (/设计|科研|工程师|总设计/.test(r)) {
@@ -317,6 +400,7 @@ function characterDecisions(run, rnd) {
         const strat = ability(ch, '战略', 50) / 100;
         const will = ability(ch, '意志', 50) / 100;
         const score = t.weight * bias * goalBias(ch, t.kind) * memoryBias(ch, t.kind) *
+          ideologyBiasForKind(civ, t.kind) * techReadinessForKind(civ, t.kind) *
           (0.55 + 0.45 * rnd()) * (0.7 + 0.3 * strat + 0.2 * will);
         if (score > bestScore) {
           bestScore = score;
@@ -485,8 +569,19 @@ function validateBody(run, body, newBatch) {
   return { ok: true };
 }
 
+function surveyKnownBody(run, worldDelta) {
+  const cand = (run.discovered.bodies || []).find(
+    b => b.flags && b.flags.landable && b.flags.surveyed === 'remote' && !b.flags.artificial
+  );
+  if (!cand) return false;
+  cand.flags.surveyed = 'orbital';
+  worldDelta.updatedBodies.push(clone(cand));
+  return true;
+}
+
 /**
  * WorldBuilder：处理 explore* + facility*
+ * 扩张深度由文明 exploreReach 门控：local 只勘察，near 写 stub/skeleton，deep 可 detailed
  */
 function worldBuilder(run, decisions, rnd) {
   const worldDelta = {
@@ -501,8 +596,12 @@ function worldBuilder(run, decisions, rnd) {
   let sysDet = 0;
   let bodyCount = 0;
 
-  // 先设施
-  const facDecisions = decisions.filter(d => d.kind === 'station.build' || d.kind === 'facility.deploy');
+  // 先设施：科技门槛 blocked 的不上图；force 调试可打标 bypassTechGate
+  const facDecisions = decisions.filter(d => {
+    if (d.kind !== 'station.build' && d.kind !== 'facility.deploy') return false;
+    if (d.bypassTechGate) return true;
+    return d.actionResult !== 'blocked';
+  });
   facDecisions.forEach(d => {
     if (bodyCount >= CAPS.maxNewBodies) return;
     const body = buildFacilityBody(run, d, rnd);
@@ -513,63 +612,63 @@ function worldBuilder(run, decisions, rnd) {
     bodyCount++;
   });
 
-  // 探测：优先 galaxy.probe / explore.system
   const explore = decisions.filter(d => EXPLORE_ACTIONS.includes(d.kind));
   explore.forEach(d => {
-    if (d.kind === 'galaxy.probe' || d.kind === 'explore.system') {
-      if (gCount >= CAPS.maxNewGalaxies) return;
-      const coord = pickFrontierCoord(run, rnd);
-      const key = `${coord.x},${coord.y},${coord.z}`;
-      if ((run.frontierCoords || []).some(c => `${c.x},${c.y},${c.z}` === key)) return;
+    const civ = (run.civs || []).find(c => c.id === d.civId);
+    const reach = exploreReachOf(civ, !!d.bypassTechGate);
 
-      let galaxy = buildGalaxyStub(run.seed, coord);
-      // 若同 id 已存在则跳过
-      if (run.discovered.galaxies.some(g => g.id === galaxy.id)) return;
-
-      run.frontierCoords.push(coord);
-      // 半数直接扩到 skeleton，探测成功则 detailed
-      const deep = d.kind === 'explore.system' || rnd() > 0.35;
-      if (deep && sysDet < CAPS.maxNewSystemsDetailed) {
-        const sk = expandGalaxyToSkeleton(galaxy, run.seed);
-        galaxy = sk.galaxy;
-        let system = sk.system;
-        if (bodyCount + 6 <= CAPS.maxNewBodies) {
-          const det = expandSystemToDetailed(system, galaxy, run.seed);
-          system = det.system;
-          galaxy = det.galaxy;
-          const accepted = [];
-          det.bodies.forEach(b => {
-            if (bodyCount >= CAPS.maxNewBodies) return;
-            const v = validateBody(run, b, worldDelta.newBodies.concat(accepted));
-            if (!v.ok) return;
-            accepted.push(b);
-            bodyCount++;
-          });
-          accepted.forEach(b => {
-            run.discovered.bodies.push(b);
-            worldDelta.newBodies.push(clone(b));
-          });
-          run.discovered.systems.push(system);
-          worldDelta.newSystems.push(clone(system));
-          sysDet++;
-        } else {
-          run.discovered.systems.push(system);
-          worldDelta.newSystems.push(clone(system));
-        }
-      }
-      run.discovered.galaxies.push(galaxy);
-      worldDelta.newGalaxies.push(clone(galaxy));
-      gCount++;
-    } else if (d.kind === 'explore.body') {
-      // 提升某个 remote landable 的 surveyed 等级
-      const cand = run.discovered.bodies.find(
-        b => b.flags && b.flags.landable && b.flags.surveyed === 'remote' && !b.flags.artificial
-      );
-      if (cand) {
-        cand.flags.surveyed = 'orbital';
-        worldDelta.updatedBodies.push(clone(cand));
-      }
+    // 蒙昧期或显式本系勘察：只升级已发现 landable 的 surveyed
+    if (d.kind === 'explore.body' || reach === 'local') {
+      surveyKnownBody(run, worldDelta);
+      return;
     }
+
+    if (d.kind !== 'galaxy.probe' && d.kind !== 'explore.system') return;
+    if (gCount >= CAPS.maxNewGalaxies) return;
+
+    const coord = pickFrontierCoord(run, rnd);
+    const key = `${coord.x},${coord.y},${coord.z}`;
+    if ((run.frontierCoords || []).some(c => `${c.x},${c.y},${c.z}` === key)) return;
+
+    let galaxy = buildGalaxyStub(run.seed, coord);
+    if (run.discovered.galaxies.some(g => g.id === galaxy.id)) return;
+
+    run.frontierCoords.push(coord);
+
+    // near：默认 stub；explore.system 或 probe 可 skeleton
+    // deep：可 detailed（每轮限 maxNewSystemsDetailed）
+    const wantSkeleton = d.kind === 'galaxy.probe' || d.kind === 'explore.system' || rnd() > 0.4;
+    const wantDetailed = reach === 'deep' && (d.kind === 'galaxy.probe' || rnd() > 0.55);
+
+    if (wantSkeleton && sysDet < CAPS.maxNewSystemsDetailed) {
+      const sk = expandGalaxyToSkeleton(galaxy, run.seed);
+      galaxy = sk.galaxy;
+      let system = sk.system;
+      if (wantDetailed && bodyCount + 6 <= CAPS.maxNewBodies) {
+        const det = expandSystemToDetailed(system, galaxy, run.seed);
+        system = det.system;
+        galaxy = det.galaxy;
+        const accepted = [];
+        det.bodies.forEach(b => {
+          if (bodyCount >= CAPS.maxNewBodies) return;
+          const v = validateBody(run, b, worldDelta.newBodies.concat(accepted));
+          if (!v.ok) return;
+          accepted.push(b);
+          bodyCount++;
+        });
+        accepted.forEach(b => {
+          run.discovered.bodies.push(b);
+          worldDelta.newBodies.push(clone(b));
+        });
+      }
+      run.discovered.systems.push(system);
+      worldDelta.newSystems.push(clone(system));
+      sysDet++;
+    }
+
+    run.discovered.galaxies.push(galaxy);
+    worldDelta.newGalaxies.push(clone(galaxy));
+    gCount++;
   });
 
   return worldDelta;
@@ -987,12 +1086,24 @@ function buildTerritoryEvents(run, decisions, patches) {
   (decisions || []).forEach(d => {
     const civ = (run.civs || []).find(c => c.id === d.civId);
     if (!civ) return;
-    const stats = civ.stats || {};
+    if (d.actionResult === 'blocked') return;
+    const stats = ensureCivStats(civ);
     const kind = d.kind || '';
-    const actionType = d.actionType || '';
+    const actionType = d.actionType || d.finalType || '';
 
     if (kind === 'policy' || kind === 'explore.body' || actionType === 'expand_frontier' || actionType === 'expand_softly') {
-      const budget = Math.max(1, Math.min(maxExpand, 2 + Math.floor((Number(stats.扩张) || 5) / 18)));
+      // 扩张预算：扩张属性 + 人口底座（人少拓不动）
+      const expandStat = Number(stats.扩张) || 5;
+      const pop = Math.max(0.5, Number(stats.人口) || 1);
+      const econ = Number(stats.经济) || 3;
+      const popFactor = Math.min(3, Math.log2(1 + pop));
+      const budget = Math.max(
+        1,
+        Math.min(
+          maxExpand,
+          1 + Math.floor(expandStat / 14) + Math.floor(popFactor) + (econ >= 8 ? 1 : 0)
+        )
+      );
       events.push({
         type: 'expand',
         civId: civ.id,
@@ -1001,7 +1112,8 @@ function buildTerritoryEvents(run, decisions, patches) {
         mode: 'frontier',
         reason: d.decision || '领袖推动边疆开拓',
         source: d.source || 'rules',
-        characterId: d.characterId
+        characterId: d.characterId,
+        statsRef: { 扩张: expandStat, 人口: pop, 经济: econ }
       });
     }
 
@@ -1010,19 +1122,40 @@ function buildTerritoryEvents(run, decisions, patches) {
         (r.a === civ.id || r.b === civ.id) && r.a !== 'all' && r.b !== 'all'
       );
       if (rel) {
-        const other = rel.a === civ.id ? rel.b : rel.a;
+        const otherId = rel.a === civ.id ? rel.b : rel.a;
+        const defender = (run.civs || []).find(c => c.id === otherId);
+        const defStats = ensureCivStats(defender || { stats: {} });
+        const atkPower = (Number(stats.军力) || 4) + (Number(stats.人口) || 1) * 0.35;
+        const defPower = (Number(defStats.军力) || 4) + (Number(defStats.人口) || 1) * 0.35;
+        const powerRatio = atkPower / Math.max(1, defPower);
         const tension = Number(rel.tension) || (/敌|对峙|冷战|交火/.test(rel.state || '') ? 55 : 25);
-        if (tension >= 40 || kind === 'military') {
+        // 军力优势或高张力才吞并；弱势且非军事决策则跳过
+        const canPress = powerRatio >= 0.75 || tension >= 55 || kind === 'military';
+        if ((tension >= 35 || kind === 'military') && canPress) {
+          const powerBonus = powerRatio >= 1.4 ? 2 : powerRatio >= 1.05 ? 1 : 0;
+          const budget = Math.max(
+            1,
+            Math.min(
+              maxAnnex,
+              1 + Math.floor(tension / 28) + powerBonus + Math.floor((Number(stats.军力) || 0) / 25)
+            )
+          );
           events.push({
             type: 'annex',
             attackerId: civ.id,
-            defenderId: other,
+            defenderId: otherId,
             surfaceId: 'gaiya:surface',
-            budget: Math.max(1, Math.min(maxAnnex, 2 + Math.floor(tension / 22))),
-            intensity: tension >= 70 ? 2 : 1,
+            budget,
+            intensity: powerRatio >= 1.3 || tension >= 70 ? 2 : 1,
+            powerRatio: Math.round(powerRatio * 100) / 100,
             reason: d.decision || '军事压力下的边境推进',
             source: d.source || 'rules',
-            characterId: d.characterId
+            characterId: d.characterId,
+            statsRef: {
+              atk军力: Number(stats.军力) || 0,
+              def军力: Number(defStats.军力) || 0,
+              atk人口: Number(stats.人口) || 0
+            }
           });
         }
       }
@@ -1034,7 +1167,7 @@ function buildTerritoryEvents(run, decisions, patches) {
     if (splitCount >= 1) return;
     const leader = (civ.leaders || [])[0];
     if (!leader) return;
-    const stable = Number(civ.stats && civ.stats.稳定) || 50;
+    const stable = Number(ensureCivStats(civ).稳定) || 50;
     const gen = Number(leader.succession && leader.succession.generation) || 1;
     const goals = (leader.agentGoals && leader.agentGoals.active) || [];
     const wantSplit = goals.some(g => g.type === 'secession') || (gen >= 2 && stable < 32);
@@ -1050,7 +1183,7 @@ function buildTerritoryEvents(run, decisions, patches) {
     child.stage = '分裂';
     child.文明阶段 = '分裂';
     child.capital = '边境营地';
-    child.stats = Object.assign({}, civ.stats || {}, {
+    child.stats = Object.assign({}, ensureCivStats(civ), {
       人口: Math.max(1, Math.round((Number(civ.stats?.人口) || 2) * 0.35)),
       军力: Math.max(1, Math.round((Number(civ.stats?.军力) || 4) * 0.4)),
       经济: Math.max(1, Math.round((Number(civ.stats?.经济) || 3) * 0.4)),
@@ -1129,7 +1262,8 @@ function buildTerritoryEvents(run, decisions, patches) {
   return out.slice(0, 12);
 }
 
-function applyResolver(run, decisions, lenses, edict, worldDelta) {
+function applyResolver(run, decisions, lenses, edict, worldDelta, opts) {
+  opts = opts || {};
   const patches = {
     warehouses: 'client-surfaces-still-authoritative-for-tiles',
     relations: [],
@@ -1140,31 +1274,30 @@ function applyResolver(run, decisions, lenses, edict, worldDelta) {
     characters: []
   };
 
-  // 年岁：世界推进多少年，角色年龄 / 寿命状态同步推进多少年
-  const yearDelta = edict ? 1 : 7;
-  run.year += yearDelta;
+  // 年岁：手动 C 回合默认 +7；阶段 D 时钟触发的重推演只结算已走过年数（最少 1）
+  const yearDelta = opts.clockDriven
+    ? Math.max(1, Math.min(5, Number(opts.clockYearDelta) || 1))
+    : (edict ? 1 : 7);
+  if (!opts.clockAlreadyAdvanced) run.year += yearDelta;
   if (run.world) run.world.年数 = run.year;
   patches.characters.push(...advanceCharacterAges(run, yearDelta));
 
-  // 科技：有 research 决策的文明推进
-  decisions.forEach(d => {
-    if (d.kind !== 'research') return;
-    const civ = (run.civs || []).find(c => c.id === d.civId);
-    if (!civ || !civ.科技树) return;
-    civ.科技树.下一阶段 = Math.min(100, (Number(civ.科技树.下一阶段) || 0) + 3);
-    const nodes = civ.科技树.节点 || {};
-    Object.keys(nodes).forEach(k => {
-      const n = nodes[k];
-      if (n && n.状态 === '研究中' && typeof n.进度 === 'number') {
-        n.进度 = Math.min(100, n.进度 + 5 + Math.floor(ability(
-          (civ.leaders || []).find(l => l.id === d.characterId) || {},
-          '学识',
-          40
-        ) / 20));
-        patches.tech.push({ civId: civ.id, node: k, progress: n.进度 });
-      }
-    });
-  });
+  // 国策年数（文案改写由 IdeologyDesigner 负责，rules_only 只加年）
+  const policyTick = tickPolicyYears(run, yearDelta, decisions);
+  patches.civs = mergeCivPatches(patches.civs, policyTick.civs);
+
+  // 科技进度 / 解锁：纯程序；节点内容须已由 LLM design 写入
+  // lens techDelta 由调用方通过 worldDelta._lensTechDelta 传入（见 deduce）
+  const lensTechDelta = (worldDelta && worldDelta._lensTechDelta) || [];
+  const techTick = tickTechProgress(run, decisions, yearDelta, lensTechDelta);
+  patches.tech = (patches.tech || []).concat(techTick.patches.tech || []);
+  patches.civs = mergeCivPatches(patches.civs, techTick.patches.civs);
+  // 供 deduce 末段排队 successors / tier_up
+  patches._unlockedEvents = techTick.unlockedEvents || [];
+
+  // 六维 stats 结算：决策驱动 + 自然漂移（在 tech unlock effects 之后，吃到 stat 解锁）
+  const statsTick = tickCivStats(run, decisions, yearDelta);
+  patches.civs = mergeCivPatches(patches.civs, statsTick.civs);
 
   // 关系微扰：军事决策可能加剧对立
   if (decisions.some(d => d.kind === 'military')) {
@@ -1173,7 +1306,17 @@ function applyResolver(run, decisions, lenses, edict, worldDelta) {
     );
     if (rel && !/热战/.test(rel.state)) {
       rel.reason = (rel.reason || '') + ' · 本轮戒备升级';
-      patches.relations.push({ a: rel.a, b: rel.b, state: rel.state });
+      // 军力差距大时张力叙述更重
+      const dawn = (run.civs || []).find(c => c.id === 'dawn');
+      const aurel = (run.civs || []).find(c => c.id === 'aurel');
+      if (dawn && aurel) {
+        const dPow = Number(ensureCivStats(dawn).军力) || 0;
+        const aPow = Number(ensureCivStats(aurel).军力) || 0;
+        if (Math.abs(dPow - aPow) >= 3) {
+          rel.tension = Math.min(90, (Number(rel.tension) || 30) + 4);
+        }
+      }
+      patches.relations.push({ a: rel.a, b: rel.b, state: rel.state, tension: rel.tension });
     }
   }
 
@@ -1245,31 +1388,71 @@ function buildChronicle(run, decisions, worldDelta, lenses, edict) {
 }
 
 function applySoftGuarantees(run, decisions, roundN, opts) {
-  // 不再每轮/隔轮强制探测或建设施。
-  // 新天体 / 新设施只在角色主动选择 explore.* / station.build / facility.deploy
-  // 或六棱镜明确追加 worldExtras 时生成，避免星图每次推演都刷。
-  // force 调试开关仍可强制塞一条弱探测。
-  if (!opts.edict && opts.force && decisions.length) {
+  // 默认不每轮刷设施。
+  // 探测保底按时代：蒙昧期 explore.body；有观星能力才 explore.system；force 才深空探针。
+  if (!opts.edict && decisions.length && (roundN % 3 === 0 || opts.force)) {
     const hasExplore = decisions.some(d => EXPLORE_ACTIONS.includes(d.kind));
     if (!hasExplore) {
-      const host = decisions.slice().sort((a, b) => {
+      const ranked = decisions.slice().sort((a, b) => {
+        const ca = (run.civs || []).find(c => c.id === a.civId);
+        const cb = (run.civs || []).find(c => c.id === b.civId);
+        const la = (ca?.leaders || []).find(l => l.id === a.characterId);
+        const lb = (cb?.leaders || []).find(l => l.id === b.characterId);
+        return ability(lb || {}, '战略', 0) - ability(la || {}, '战略', 0);
+      });
+      const host = ranked[0];
+      if (host) {
+        const civ = (run.civs || []).find(c => c.id === host.civId);
+        const reach = exploreReachOf(civ, !!opts.force);
+        if (opts.force) {
+          host.kind = 'galaxy.probe';
+          host.decision = `${host.characterName}：批准邻域深空探针投放（force 调试扩展）`;
+          host.bypassTechGate = true;
+        } else if (reach === 'local') {
+          host.kind = 'explore.body';
+          host.decision = `${host.characterName}：组织对已知天体的近距勘察`;
+        } else {
+          host.kind = 'explore.system';
+          host.decision = `${host.characterName}：批准一次有限航程的邻域探测`;
+        }
+      }
+    }
+  }
+  if (!opts.edict && opts.force && decisions.length) {
+    // force：已有探测也打 bypass；没有则指定最强战略者做深空探针
+    let exploreHost = decisions.find(d => EXPLORE_ACTIONS.includes(d.kind));
+    if (!exploreHost) {
+      exploreHost = decisions.slice().sort((a, b) => {
         const ca = (run.civs || []).find(c => c.id === a.civId);
         const cb = (run.civs || []).find(c => c.id === b.civId);
         const la = (ca?.leaders || []).find(l => l.id === a.characterId);
         const lb = (cb?.leaders || []).find(l => l.id === b.characterId);
         return ability(lb || {}, '战略', 0) - ability(la || {}, '战略', 0);
       })[0];
-      if (host) {
-        host.kind = 'galaxy.probe';
-        host.decision = `${host.characterName}：批准邻域深空探针投放（force 调试扩展）`;
+      if (exploreHost) {
+        exploreHost.kind = 'galaxy.probe';
+        exploreHost.decision = `${exploreHost.characterName}：批准邻域深空探针投放（force 调试扩展）`;
       }
+    }
+    if (exploreHost) {
+      exploreHost.bypassTechGate = true;
+      if (exploreHost.kind === 'explore.body') exploreHost.kind = 'galaxy.probe';
+      const { char: exChar } = findLeader(run, exploreHost.characterId, exploreHost.civId);
+      if (exChar) exChar._forceBypassTech = true;
     }
     const hasFac = decisions.some(d => d.kind === 'station.build' || d.kind === 'facility.deploy');
     if (!hasFac) {
-      const builder = decisions.find(d => /工程|科研|领袖|工匠/.test(d.role || '')) || decisions[0];
+      const builder = decisions.find(d =>
+        !EXPLORE_ACTIONS.includes(d.kind)
+        && (/工程|科研|领袖|工匠/.test(d.role || ''))
+      ) || decisions.find(d => !EXPLORE_ACTIONS.includes(d.kind)) || decisions[0];
       if (builder) {
         builder.kind = 'facility.deploy';
         builder.decision = `${builder.characterName}：批准部署新轨道设施（force 调试设施）`;
+        builder.bypassTechGate = true;
+        // 让 refreshDecisionActions / chooseLeaderAction 跳过登天门槛
+        const { char } = findLeader(run, builder.characterId, builder.civId);
+        if (char) char._forceBypassTech = true;
       }
     }
   }
@@ -1880,6 +2063,7 @@ function normalizeLensPatches(raw, run, decisions) {
 
 /**
  * 把六棱镜补丁写入 run + 可能追加 worldDelta（额外探测/设施/勘察）
+ * techDelta 不在此直接改进度，写入 worldDelta._lensTechDelta 由 tickTechProgress 统一结算
  */
 function applyLensPatches(run, decisions, worldDelta, lensPatches, rnd) {
   const patches = {
@@ -1890,19 +2074,20 @@ function applyLensPatches(run, decisions, worldDelta, lensPatches, rnd) {
   };
   if (!lensPatches) return patches;
 
-  (lensPatches.techDelta || []).forEach(t => {
-    const civ = (run.civs || []).find(c => c.id === t.civId);
-    if (!civ || !civ.科技树) return;
-    civ.科技树.下一阶段 = Math.min(100, Math.max(0, (Number(civ.科技树.下一阶段) || 0) + t.amount));
-    const nodes = civ.科技树.节点 || {};
-    Object.keys(nodes).forEach(k => {
-      const n = nodes[k];
-      if (n && n.状态 === '研究中' && typeof n.进度 === 'number' && t.amount > 0) {
-        n.进度 = Math.min(100, n.进度 + t.amount);
-        patches.tech.push({ civId: civ.id, node: k, progress: n.进度, source: 'lens' });
+  if (Array.isArray(lensPatches.techDelta) && lensPatches.techDelta.length) {
+    worldDelta._lensTechDelta = (worldDelta._lensTechDelta || []).concat(lensPatches.techDelta);
+    lensPatches.techDelta.forEach(t => {
+      if (t && t.civId) {
+        patches.tech.push({
+          civId: t.civId,
+          node: null,
+          progress: null,
+          amount: t.amount,
+          source: 'lens_delta_queued'
+        });
       }
     });
-  });
+  }
 
   (lensPatches.relationShifts || []).forEach(r => {
     const rel = (run.relations || []).find(x =>
@@ -2249,14 +2434,18 @@ async function deduce(run, opts) {
 
   const yearFrom = run.year;
 
-  // 1) Character 规则底稿
-  let decisions = characterDecisions(run, rnd);
+  // 0a) 阶段 D：Drain 已支付神谕 → ForcedPatch（最高优先，Agent 不可否决）
+  let oracleDrain = { patches: { civs: [], characters: [], tech: [], relations: [], oracle: [] }, events: [] };
+  try {
+    oracleDrain = drainEdicts(run) || oracleDrain;
+  } catch (err) {
+    oracleDrain = {
+      patches: { civs: [], characters: [], tech: [], relations: [], oracle: [] },
+      events: [`神谕 Drain 异常：${String(err && err.message || err).slice(0, 80)}`]
+    };
+  }
 
-  // 2) 软保底（explore / facility）
-  applySoftGuarantees(run, decisions, roundN, opts);
-  refreshDecisionActions(run, decisions, rnd);
-
-  // 2b) hybrid / full：每人独立 LLM 决策（自述稍后生成）
+  // 0) hybrid/full：空科技树文明排队 seed；rules_only 不 design
   let llmMeta = {
     requested: agentMode,
     used: 'rules_only',
@@ -2265,21 +2454,51 @@ async function deduce(run, opts) {
     fallback: agentMode === 'rules_only' ? null : 'skipped',
     error: null,
     logIds: [],
-    perCharacter: false
+    perCharacter: false,
+    design: null
   };
+  let designPatchesEarly = { tech: [], civs: [], design: [] };
+  if (agentMode !== 'rules_only') {
+    queueTechSeedsIfEmpty(run);
+    try {
+      designPatchesEarly = await flushDesignQueue(run, opts, agentMode, roundN, llmMeta);
+    } catch (err) {
+      llmMeta.designError = String(err && err.message || err);
+    }
+  }
+
+  // 1) Character 规则底稿（读国策 focus / 已解锁 tags / 能力门槛）
+  let decisions = characterDecisions(run, rnd);
+
+  // 2) 软保底（explore / facility）
+  applySoftGuarantees(run, decisions, roundN, opts);
+  refreshDecisionActions(run, decisions, rnd);
+
+  // 2b) hybrid / full：每人独立 LLM 决策（自述稍后生成）
   if (agentMode !== 'rules_only') {
     const enhanced = await enhanceWithLlm(run, decisions, opts, agentMode, roundN);
     decisions = enhanced.decisions;
+    // 保留 design 统计
+    const prevDesign = llmMeta.design;
+    const prevDesignErr = llmMeta.designError;
+    const prevLogs = llmMeta.logIds || [];
+    const prevCalls = llmMeta.llmCalls || 0;
+    const prevMs = llmMeta.llmMs || 0;
     llmMeta = enhanced.meta;
-    llmMeta.logIds = llmMeta.logIds || [];
+    llmMeta.logIds = (llmMeta.logIds || []).concat(prevLogs);
+    llmMeta.llmCalls = (llmMeta.llmCalls || 0) + prevCalls;
+    llmMeta.llmMs = (llmMeta.llmMs || 0) + prevMs;
+    if (prevDesign) llmMeta.design = prevDesign;
+    if (prevDesignErr) llmMeta.designError = prevDesignErr;
     applySoftGuarantees(run, decisions, roundN, opts);
     refreshDecisionActions(run, decisions, rnd);
   }
 
   // 3) WorldBuilder：决策驱动的扩张 / 建筑
   const worldDelta = opts.edict && !opts.force
-    ? { newGalaxies: [], newSystems: [], newBodies: [], updatedBodies: [], removedBodyIds: [] }
+    ? { newGalaxies: [], newSystems: [], newBodies: [], updatedBodies: [], removedBodyIds: [], _lensTechDelta: [] }
     : worldBuilder(run, decisions, rnd);
+  if (!worldDelta._lensTechDelta) worldDelta._lensTechDelta = [];
 
   // 3b) 新天体细节润色（可选）
   if (agentMode !== 'rules_only' && llmMeta.used !== 'rules_only') {
@@ -2309,9 +2528,9 @@ async function deduce(run, opts) {
   // 把六棱镜补丁应用到世界状态（科技/关系/立场/额外扩张）
   const lensApplied = applyLensPatches(run, decisions, worldDelta, lensPatchResult, rnd);
 
-  // 5) Resolver：年份推进 + 决策驱动科技/关系 + Agent 记忆/目标/行动/继承
-  const { yearDelta, patches } = applyResolver(run, decisions, lenses, opts.edict, worldDelta);
-  // 合并六棱镜补丁摘要
+  // 5) Resolver：年份推进 + 科技进度/国策年数 + Agent 记忆/目标/行动/继承
+  const { yearDelta, patches } = applyResolver(run, decisions, lenses, opts.edict, worldDelta, opts);
+  // 合并六棱镜补丁摘要（tech 进度已并入 tick；此处只保留队列标记与其它）
   if (lensApplied.tech && lensApplied.tech.length) {
     patches.tech = (patches.tech || []).concat(lensApplied.tech);
   }
@@ -2325,7 +2544,52 @@ async function deduce(run, opts) {
     patches.worldExtras = lensApplied.worldExtras;
   }
   patches.lensEvents = lensEvents;
-  // Agent 系统与领土意图已在 applyResolver 内处理
+  // 神谕 ForcedPatch 最高优先：合并进 patches（在 design 之前，保证可见）
+  if (oracleDrain.patches) {
+    if (oracleDrain.patches.civs && oracleDrain.patches.civs.length) {
+      patches.civs = mergeCivPatches(oracleDrain.patches.civs, patches.civs || []);
+    }
+    if (oracleDrain.patches.characters && oracleDrain.patches.characters.length) {
+      patches.characters = (oracleDrain.patches.characters || []).concat(patches.characters || []);
+    }
+    if (oracleDrain.patches.tech && oracleDrain.patches.tech.length) {
+      patches.tech = (oracleDrain.patches.tech || []).concat(patches.tech || []);
+    }
+    if (oracleDrain.patches.relations && oracleDrain.patches.relations.length) {
+      patches.relations = (oracleDrain.patches.relations || []).concat(patches.relations || []);
+    }
+    patches.oracle = oracleDrain.patches.oracle || [];
+  }
+  patches.oracleEvents = oracleDrain.events || [];
+  // 早段 design（seed）写入
+  if (designPatchesEarly.tech && designPatchesEarly.tech.length) {
+    patches.tech = (designPatchesEarly.tech || []).concat(patches.tech || []);
+  }
+  if (designPatchesEarly.civs && designPatchesEarly.civs.length) {
+    patches.civs = mergeCivPatches(patches.civs, designPatchesEarly.civs);
+  }
+  patches.design = (designPatchesEarly.design || []).slice();
+
+  // 5b) 解锁后继 / 开题 / 国策改写 入队，并在 hybrid 下每文明独立 flush
+  const unlockedEvents = patches._unlockedEvents || [];
+  delete patches._unlockedEvents;
+  if (agentMode !== 'rules_only') {
+    queueAfterUnlocks(run, unlockedEvents);
+    queueOpenResearch(run, decisions);
+    queueIdeologyJobs(run, decisions, yearDelta);
+    try {
+      const designLater = await flushDesignQueue(run, opts, agentMode, roundN, llmMeta);
+      if (designLater.tech && designLater.tech.length) {
+        patches.tech = (patches.tech || []).concat(designLater.tech);
+      }
+      if (designLater.civs && designLater.civs.length) {
+        patches.civs = mergeCivPatches(patches.civs, designLater.civs);
+      }
+      patches.design = (patches.design || []).concat(designLater.design || []);
+    } catch (err) {
+      llmMeta.designError = String(err && err.message || err);
+    }
+  }
 
   const yearTo = run.year;
 
@@ -2353,6 +2617,10 @@ async function deduce(run, opts) {
   const chronicleEntry = buildChronicle(run, decisions, worldDelta, lenses, opts.edict);
   if (lensEvents.length) {
     chronicleEntry.事件 = (chronicleEntry.事件 + ' ' + lensEvents.slice(0, 2).join(' ')).slice(0, 400);
+  }
+  if (oracleDrain.events && oracleDrain.events.length) {
+    chronicleEntry.事件 = (`【神谕】${oracleDrain.events[0]} ` + (chronicleEntry.事件 || '')).slice(0, 400);
+    chronicleEntry.类型 = chronicleEntry.类型 || '神谕';
   }
 
   // 镜头卷

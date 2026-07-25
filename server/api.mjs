@@ -1,7 +1,7 @@
 /* ============================================================
-   创世引擎 · API（阶段 C）
-   只读：GET health / snapshot / bodies / surfaces
-   写入：POST /api/v1/runs · POST /api/v1/runs/:id/deduce
+   创世引擎 · API（阶段 D）
+   只读：GET health / snapshot / bodies / surfaces / me / oracle
+   写入：runs / deduce / seats / oracle / clock
    同时托管静态资源。
    ============================================================ */
 import http from 'http';
@@ -13,6 +13,10 @@ import { deduce } from './deduce-engine.mjs';
 import { ensureSurfaceOnRun } from './surface-ensure.mjs';
 import * as llmSettings from './llm-settings.mjs';
 import * as llmLog from './llm-log.mjs';
+import * as seatService from './seat-service.mjs';
+import * as clockService from './clock-service.mjs';
+import * as oracleService from './oracle-service.mjs';
+import * as sseHub from './sse-hub.mjs';
 
 const port = process.env.PORT ? Number(process.env.PORT) : 8123;
 const mime = {
@@ -31,6 +35,23 @@ const mime = {
 
 const ge = loadGeData();
 runStore.ensureDefault();
+
+// 同一 Run 的 deduce 必须串行：LLM 回合可能持续数十秒，若并发会重复读取
+// roundN / designQueue 并各自写回，造成重复 seed 与相同回合号。
+const deduceLocks = new Map();
+async function withDeduceLock(runId, work) {
+  const prior = deduceLocks.get(runId) || Promise.resolve();
+  let release;
+  const mine = new Promise(resolve => { release = resolve; });
+  deduceLocks.set(runId, mine);
+  await prior.catch(() => {});
+  try {
+    return await work();
+  } finally {
+    release();
+    if (deduceLocks.get(runId) === mine) deduceLocks.delete(runId);
+  }
+}
 
 function json(res, status, body) {
   const payload = JSON.stringify(body);
@@ -96,15 +117,91 @@ const WRITE_ALLOWED = new Set([
   'PUT /api/v1/llm-settings',
   'POST /api/v1/llm-settings',
   'DELETE /api/v1/llm-settings',
-  'DELETE /api/v1/llm-logs'
+  'DELETE /api/v1/llm-logs',
+  'POST /api/v1/runs/:id/seats/claim',
+  'POST /api/v1/runs/:id/seats/spectate',
+  'POST /api/v1/runs/:id/oracle',
+  'POST /api/v1/runs/:id/oracle/:eid/cancel',
+  'POST /api/v1/runs/:id/clock/pause',
+  'POST /api/v1/runs/:id/clock/advance'
 ]);
+
+function playerTokenFrom(req, body) {
+  const h = req.headers || {};
+  const fromHeader = h['x-player-token'] || h['X-Player-Token'];
+  if (fromHeader) return String(fromHeader).trim();
+  if (body && body.playerToken) return String(body.playerToken).trim();
+  try {
+    const u = new URL(req.url || '/', 'http://localhost');
+    if (u.searchParams.get('playerToken')) return u.searchParams.get('playerToken');
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function touchRun(run) {
+  try { runStore.touch(run); } catch (_) { /* ignore */ }
+}
+
+function ensureRunTicked(run) {
+  if (!run) return null;
+  runStore.ensurePhaseDFields(run);
+  const tick = clockService.tick(run);
+  if (tick && (tick.yearDelta > 0 || (tick.granted && tick.granted.length))) {
+    touchRun(run);
+    if (tick.yearDelta > 0) {
+      sseHub.publish(run.id, 'year.tick', { year: tick.year, yearDelta: tick.yearDelta });
+    }
+    (tick.granted || []).forEach(g => sseHub.publish(run.id, 'oracle.points', g));
+  }
+  return tick;
+}
+
+/**
+ * 现实 WorldClock 驱动：轻量 tick 不触发 LLM；满 5 年或有已支付神谕时
+ * 进入现有 deduce，并复用 per-run lock 防止与手动请求并发。
+ */
+async function pollWorldClocks() {
+  const runs = runStore.activeRuns();
+  for (const run of runs) {
+    try {
+      const tick = ensureRunTicked(run);
+      if (!tick || !tick.needHeavyRound) continue;
+      // 结算自上次重推演以来的全部时钟年，最多 N=5；不能只结算本次 tick。
+      const delta = Math.max(
+        1,
+        Math.min(5, Number(run.clock?.yearsSinceRound) || Number(tick.yearDelta) || 1)
+      );
+      sseHub.publish(run.id, 'round.progress', { phase: 'start', year: run.year, clockDriven: true });
+      const result = await withDeduceLock(run.id, () => deduce(run, {
+        agentMode: 'rules_only',
+        clockDriven: true,
+        clockAlreadyAdvanced: true,
+        clockYearDelta: delta
+      }));
+      clockService.markHeavyRoundDone(run);
+      clockService.syncClockToRunYear(run);
+      touchRun(run);
+      sseHub.publish(run.id, 'round.done', {
+        round: result.round?.n,
+        year: result.year,
+        revision: result.revision,
+        clockDriven: true,
+        oracle: result.patchesSummary?.oracle || []
+      });
+      (result.patchesSummary?.oracle || []).forEach(o => sseHub.publish(run.id, 'oracle.applied', o));
+    } catch (err) {
+      console.error('[clock]', run && run.id, err);
+      sseHub.publish(run.id, 'round.progress', { phase: 'error', error: String(err && err.message || err).slice(0, 160) });
+    }
+  }
+}
 
 async function handleApi(req, res, urlPath) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Accept, Content-Type'
+      'Access-Control-Allow-Headers': 'Accept, Content-Type, X-Player-Token'
     });
     res.end();
     return true;
@@ -113,19 +210,24 @@ async function handleApi(req, res, urlPath) {
   // ---------- health ----------
   if ((urlPath === '/api/v1/health' || urlPath === '/api/health') && req.method === 'GET') {
     const run = runStore.ensureDefault();
+    ensureRunTicked(run);
     const llm = llmSettings.getPublic({ maskKey: true });
     json(res, 200, {
       ok: true,
       apiVersion: 'v1',
       schemaVersion: 1,
-      phase: 'C',
+      phase: 'D',
       writeOps: true,
       c6: true,
+      dOracle: true,
       writeAllow: [
         'POST /api/v1/runs',
         'POST /api/v1/runs/:id/deduce',
         'POST /api/v1/bodies/:id/surface/ensure',
-        'PUT /api/v1/llm-settings'
+        'PUT /api/v1/llm-settings',
+        'POST /api/v1/runs/:id/seats/claim',
+        'POST /api/v1/runs/:id/oracle',
+        'POST /api/v1/runs/:id/clock/pause'
       ],
       agentModes: ['rules_only', 'hybrid', 'full'],
       agentMode: llm.agentMode || run.agentMode || 'rules_only',
@@ -139,7 +241,9 @@ async function handleApi(req, res, urlPath) {
       llmLog: llmLog.list({ limit: 1 }).totals,
       runId: run.id,
       revision: run.revision,
-      year: run.year
+      year: run.year,
+      clock: clockService.clockPublic(run),
+      seats: (run.seats || []).length
     });
     return true;
   }
@@ -362,6 +466,195 @@ async function handleApi(req, res, urlPath) {
     return true;
   }
 
+  // ---------- Phase D: SSE events ----------
+  const eventsMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/events$/);
+  if (eventsMatch && req.method === 'GET') {
+    const id = decodeURIComponent(eventsMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, null);
+    const seat = token ? seatService.findSeatByToken(run, token) : null;
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'X-Accel-Buffering': 'no'
+    });
+    res.write('retry: 3000\n\n');
+    const clientId = sseHub.addClient(run.id, res, { playerId: seat?.playerId || null });
+    res.write(`event: ready\ndata: ${JSON.stringify({ runId: run.id, year: run.year, clock: clockService.clockPublic(run), seat: seatService.publicSeat(seat) })}\n\n`);
+    const timer = setInterval(() => sseHub.heartbeat(run.id), 25000);
+    req.on('close', () => {
+      clearInterval(timer);
+      sseHub.removeClient(run.id, clientId);
+    });
+    return true;
+  }
+
+  // ---------- Phase D: seats / me / oracle / clock ----------
+  const seatClaimMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/seats\/claim$/);
+  if (seatClaimMatch && req.method === 'POST') {
+    const id = decodeURIComponent(seatClaimMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, body) || body.playerToken;
+    const result = seatService.claimSeat(run, { ...body, playerToken: token });
+    if (!result.ok) { json(res, result.status || 400, result); return true; }
+    touchRun(run);
+    sseHub.publish(run.id, 'seat.claimed', { seat: result.seat });
+    json(res, result.created ? 201 : 200, result);
+    return true;
+  }
+
+  const seatSpectateMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/seats\/spectate$/);
+  if (seatSpectateMatch && req.method === 'POST') {
+    const id = decodeURIComponent(seatSpectateMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    const token = playerTokenFrom(req, body) || body.playerToken;
+    const result = seatService.claimSpectator(run, { ...body, playerToken: token });
+    if (!result.ok) { json(res, result.status || 400, result); return true; }
+    touchRun(run);
+    json(res, 200, result);
+    return true;
+  }
+
+  const seatsListMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/seats$/);
+  if (seatsListMatch && req.method === 'GET') {
+    const id = decodeURIComponent(seatsListMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    ensureRunTicked(run);
+    json(res, 200, { items: seatService.listSeatsPublic(run) });
+    return true;
+  }
+
+  const meMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/me$/);
+  if (meMatch && req.method === 'GET') {
+    const id = decodeURIComponent(meMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, null);
+    const result = seatService.me(run, token);
+    if (!result.ok) { json(res, result.status || 404, result); return true; }
+    json(res, 200, result);
+    return true;
+  }
+
+  const oracleGetMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/oracle$/);
+  if (oracleGetMatch && req.method === 'GET') {
+    const id = decodeURIComponent(oracleGetMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, null);
+    const result = oracleService.oracleStatus(run, token);
+    if (!result.ok) { json(res, result.status || 404, result); return true; }
+    json(res, 200, result);
+    return true;
+  }
+
+  if (oracleGetMatch && req.method === 'POST') {
+    const id = decodeURIComponent(oracleGetMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, body);
+    const result = oracleService.submitOracle(run, token, body);
+    if (!result.ok) {
+      sseHub.publish(run.id, 'oracle.rejected', { error: result.error, message: result.message, playerId: token || null });
+      json(res, result.status || 422, result);
+      return true;
+    }
+    touchRun(run);
+    sseHub.publish(run.id, 'oracle.queued', { edictId: result.edictId, cost: result.cost, pointsLeft: result.pointsLeft });
+    sseHub.publish(run.id, 'oracle.points', { playerId: token || null, points: result.pointsLeft, delta: -result.cost });
+    json(res, 200, result);
+    return true;
+  }
+
+  const oracleCancelMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/oracle\/([^/]+)\/cancel$/);
+  if (oracleCancelMatch && req.method === 'POST') {
+    const id = decodeURIComponent(oracleCancelMatch[1]);
+    const eid = decodeURIComponent(oracleCancelMatch[2]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    const token = playerTokenFrom(req, body);
+    const result = oracleService.cancelOracle(run, token, eid);
+    if (!result.ok) { json(res, result.status || 400, result); return true; }
+    touchRun(run);
+    sseHub.publish(run.id, 'oracle.cancelled', { edictId: eid, points: result.points });
+    sseHub.publish(run.id, 'oracle.points', { playerId: token || null, points: result.points });
+    json(res, 200, result);
+    return true;
+  }
+
+  const oracleLedgerMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/oracle\/ledger$/);
+  if (oracleLedgerMatch && req.method === 'GET') {
+    const id = decodeURIComponent(oracleLedgerMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    const token = playerTokenFrom(req, null);
+    json(res, 200, oracleService.ledger(run, token));
+    return true;
+  }
+
+  const clockPauseMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/clock\/pause$/);
+  if (clockPauseMatch && req.method === 'POST') {
+    const id = decodeURIComponent(clockPauseMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, body);
+    const seat = seatService.findSeatByToken(run, token);
+    if (!seat || seat.role !== 'owner') {
+      json(res, 403, { error: 'owner_only', needOwner: true, message: '只有 owner 席位可以控制 WorldClock' });
+      return true;
+    }
+    // body.paused 显式 false 解暂停；缺省 true
+    const wantPaused = body.paused == null ? true : !!body.paused;
+    const r2 = clockService.setPaused(run, wantPaused, seat);
+    if (!r2.ok) { json(res, r2.status || 403, Object.assign({ needOwner: true }, r2)); return true; }
+    touchRun(run);
+    const clock = clockService.clockPublic(run);
+    const seatPublic = seatService.publicSeat(seat);
+    sseHub.publish(run.id, 'clock.pause', { paused: r2.paused, year: run.year, clock, seat: seatPublic });
+    json(res, 200, { ok: true, ...r2, clock, seat: seatPublic });
+    return true;
+  }
+
+  const clockAdvanceMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/clock\/advance$/);
+  if (clockAdvanceMatch && req.method === 'POST') {
+    const id = decodeURIComponent(clockAdvanceMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    const token = playerTokenFrom(req, body);
+    const seat = seatService.findSeatByToken(run, token);
+    if (!seat || seat.role !== 'owner') { json(res, 403, { error: 'owner_only' }); return true; }
+    const result = clockService.advanceYears(run, body.years || 1, body);
+    touchRun(run);
+    sseHub.publish(run.id, 'year.tick', { year: result.year, yearDelta: result.yearDelta, debug: true });
+    (result.granted || []).forEach(g => sseHub.publish(run.id, 'oracle.points', g));
+    json(res, 200, { ...result, clock: clockService.clockPublic(run) });
+    return true;
+  }
+
   // ---------- deduce ----------
   const deduceMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/deduce$/);
   if (deduceMatch && req.method === 'POST') {
@@ -383,6 +676,7 @@ async function handleApi(req, res, urlPath) {
       return true;
     }
     try {
+      ensureRunTicked(run);
       // C6：优先用前端已保存到后端的 LLM 设置；请求体可临时覆盖
       const overrideLlm = body.llm && typeof body.llm === 'object'
         ? {
@@ -397,15 +691,26 @@ async function handleApi(req, res, urlPath) {
         agentMode: body.agentMode || null,
         llm: overrideLlm
       });
-      const result = await deduce(run, {
+      // 正式神谕走 /oracle → Drain；body.edict 仅作编年风味/兼容旧 QA
+      const result = await withDeduceLock(id, () => deduce(run, {
         force: !!body.force,
         edict: body.edict || null,
         agentMode: resolved.agentMode,
         llm: resolved.llm
-      });
+      }));
       if (result && result.agentMeta) {
         result.agentMeta.configSource = resolved.source;
       }
+      clockService.markHeavyRoundDone(run);
+      clockService.syncClockToRunYear(run);
+      touchRun(run);
+      sseHub.publish(run.id, 'round.done', {
+        round: result.round?.n,
+        year: result.year,
+        revision: result.revision,
+        oracle: result.patchesSummary?.oracle || []
+      });
+      (result.patchesSummary?.oracle || []).forEach(o => sseHub.publish(run.id, 'oracle.applied', o));
       json(res, 200, result);
     } catch (err) {
       console.error('[deduce]', err);
@@ -529,10 +834,17 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`[创世引擎] 阶段 C API + 静态 http://localhost:${port}`);
+  console.log(`[创世引擎] 阶段 D API + 静态 http://localhost:${port}`);
   console.log(`[创世引擎] snapshot  → GET  /api/v1/snapshot`);
   console.log(`[创世引擎] deduce    → POST /api/v1/runs/${runStore.DEFAULT_RUN_ID}/deduce`);
+  console.log(`[创世引擎] oracle    → POST /api/v1/runs/:id/oracle`);
   console.log(`[创世引擎] llm 设置 → GET/PUT /api/v1/llm-settings（仅前端表单写入）`);
 });
+
+// 低频检查；即使无人访问，也让解除暂停的 Run 随真实世界年推进。
+const clockTimer = setInterval(() => {
+  pollWorldClocks().catch(err => console.error('[clock-poll]', err));
+}, 30_000);
+if (typeof clockTimer.unref === 'function') clockTimer.unref();
 
 export { server, runStore };

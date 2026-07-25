@@ -8,8 +8,10 @@ node_modules/
 playwright-report/
 test-results/
 qa/shots/
+.qa-data/
 
-# Frontend-saved LLM credentials (never commit)
+# Runtime data / frontend-saved LLM credentials (never commit)
+data/runs/
 data/llm-settings.json
 
 # Local conversation exports

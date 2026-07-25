@@ -1,7 +1,7 @@
 import { test, expect } from 'playwright/test';
 
 test.describe('Phase B read-only snapshot API', () => {
-  test('health reports phase C with deduce write path', async ({ request }) => {
+  test('health reports phase D with oracle write path', async ({ request }) => {
     const res = await request.get('/api/v1/health');
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
@@ -9,9 +9,11 @@ test.describe('Phase B read-only snapshot API', () => {
       ok: true,
       apiVersion: 'v1',
       schemaVersion: 1,
-      phase: 'C',
-      writeOps: true
+      phase: 'D',
+      writeOps: true,
+      dOracle: true
     }));
+    expect(body.writeAllow).toContain('POST /api/v1/runs/:id/oracle');
   });
 
   test('snapshot contract has world, bodies, surfaces, catalogs', async ({ request }) => {
@@ -29,7 +31,7 @@ test.describe('Phase B read-only snapshot API', () => {
     }));
     expect(snap.clock).toEqual(expect.objectContaining({
       year: snap.world.年数,
-      paused: true,
+      paused: expect.any(Boolean),
       realtimeMinutesPerYear: 10
     }));
     expect(Array.isArray(snap.civs)).toBe(true);
@@ -100,7 +102,8 @@ test.describe('Snapshot providers in browser', () => {
   });
 
   test('local provider hydrates without changing active facade defaults', async ({ page }) => {
-    await page.goto('/');
+    // HTTP 服务打开页面时产品默认走权威快照；显式 data=local 才测本地 Provider。
+    await page.goto('/?data=local');
     await page.waitForSelector('#boot.done');
 
     const report = await page.evaluate(() => ({

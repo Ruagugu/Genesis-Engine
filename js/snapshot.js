@@ -225,7 +225,11 @@ GE.snapshot = (function () {
       if (fromQuery === 'http' || fromQuery === 'api') return 'http';
       if (fromQuery === 'local') return 'local';
       if (window.GE_SNAPSHOT_MODE === 'http') return 'http';
+      if (window.GE_SNAPSHOT_MODE === 'local') return 'local';
       if (localStorage.getItem('ge-snapshot-mode') === 'http') return 'http';
+      if (localStorage.getItem('ge-snapshot-mode') === 'local') return 'local';
+      // 经本机服务打开页面时默认走服务端快照，才能接住推演存档
+      if (typeof location !== 'undefined' && /^https?:$/i.test(location.protocol || '')) return 'http';
     } catch (_) { /* ignore */ }
     return 'local';
   }
@@ -239,6 +243,10 @@ GE.snapshot = (function () {
       }
       if (!base && GE.llmConfig && typeof GE.llmConfig.worldBase === 'function') {
         base = GE.llmConfig.worldBase() || '';
+      }
+      // 同源打开时用当前 origin，避免相对路径取错
+      if (!base && typeof location !== 'undefined' && /^https?:$/i.test(location.protocol || '')) {
+        base = location.origin || '';
       }
       return String(base).replace(/\/$/, '');
     } catch (_) {

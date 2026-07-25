@@ -41,7 +41,8 @@ test.describe('Phase C5 surface ensure', () => {
     await request.post('/api/v1/runs', { data: { id: rid, seed: 20260723, reset: true } });
     let landable = null;
     for (let i = 0; i < 16 && !landable; i++) {
-      const res = await request.post(`/api/v1/runs/${rid}/deduce`, { data: {} });
+      // force 绕过原始时代 sky_lore/orbit_craft 门控；本用例只验证新 Body → surface ensure。
+      const res = await request.post(`/api/v1/runs/${rid}/deduce`, { data: { force: true, agentMode: 'rules_only' } });
       expect(res.ok()).toBeTruthy();
       const body = await res.json();
       landable = (body.worldDelta.newBodies || []).find(

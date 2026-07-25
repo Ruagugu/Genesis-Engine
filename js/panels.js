@@ -123,14 +123,16 @@ GE.panels = (function () {
 
   /* ---------- 科技树 ---------- */
   function renderTechTree(el, c) {
-    const t = c.科技树;
-    const next = D().thresholds.find(x => x.lv === (t.文明等级 + '→' + (t.文明等级 + 1)));
+    const t = c.科技树 || { 文明等级: Number(c.level) || 0, 下一阶段: 0, 节点: {} };
+    const nodes = t.节点 || {};
+    const nodeCount = Object.keys(nodes).length;
+    const next = (D().thresholds || []).find(x => x.lv === (t.文明等级 + '→' + (t.文明等级 + 1)));
     el.innerHTML = `
       <div class="panel panel-hi" style="display:flex;align-items:center;gap:18px;margin-bottom:16px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:12px">
-          ${ring(t.下一阶段, 54, c.color)}
+          ${ring(Number(t.下一阶段) || 0, 54, c.color)}
           <div><div style="font-weight:700;color:var(--tx-0)">文明等级 ${t.文明等级}「${civLevelName(t.文明等级)}」</div>
-          <div style="font-size:11px;color:var(--tx-2);margin-top:2px">距 ${t.文明等级 + 1} 级「${civLevelName(t.文明等级 + 1)}」进度 ${t.下一阶段}%</div></div>
+          <div style="font-size:11px;color:var(--tx-2);margin-top:2px">距 ${t.文明等级 + 1} 级「${civLevelName(t.文明等级 + 1)}」进度 ${Number(t.下一阶段) || 0}%</div></div>
         </div>
         <div style="flex:1;min-width:180px">
           ${next ? `<div style="font-size:11px;color:var(--tx-2)">跃迁门槛</div>
@@ -142,9 +144,17 @@ GE.panels = (function () {
           <span style="display:flex;align-items:center;gap:5px"><i style="width:10px;height:10px;border-radius:99px;background:#5fd6e6;display:inline-block"></i>研究中</span>
         </div>
       </div>
-      <div class="techtree panel" id="tt-host"></div>
-      <div id="tt-detail" style="margin-top:14px"></div>`;
-    buildTechTreeSVG(el.querySelector('#tt-host'), c);
+      ${nodeCount === 0
+        ? `<div class="panel" style="padding:18px;color:var(--tx-2);line-height:1.7">
+            尚无系统化知识谱系。<br/>
+            <span style="font-size:12px">
+              rules_only 不会设计节点。<br/>
+              hybrid/full 下由各文明独立 TechDesigner 写入；若模型超时会在后续推演轮次自动重试。
+            </span>
+          </div>`
+        : `<div class="techtree panel" id="tt-host"></div>
+           <div id="tt-detail" style="margin-top:14px"></div>`}`;
+    if (nodeCount > 0) buildTechTreeSVG(el.querySelector('#tt-host'), c);
   }
 
   function ring(pct, size, color) {
@@ -157,13 +167,18 @@ GE.panels = (function () {
   }
 
   function buildTechTreeSVG(host, c) {
-    const nodes = c.科技树.节点;
+    if (!host) return;
+    const nodes = (c.科技树 && c.科技树.节点) || {};
     const names = Object.keys(nodes);
+    if (!names.length) {
+      host.innerHTML = '<div style="padding:12px;color:var(--tx-2)">（空）</div>';
+      return;
+    }
     // 深度计算
     const depth = {};
     function dep(n, seen) {
       if (depth[n] != null) return depth[n];
-      const pre = nodes[n].前置;
+      const pre = nodes[n] && nodes[n].前置;
       if (!pre || pre === '无' || !nodes[pre]) return (depth[n] = 0);
       if ((seen || []).includes(n)) return (depth[n] = 0);
       return (depth[n] = dep(pre, (seen || []).concat(n)) + 1);
@@ -764,39 +779,335 @@ GE.panels = (function () {
   }
 
   /* ============================================================
-     神谕（玩家最高权限干涉）
+     神谕（阶段 D · 点数购档 · P9）
      ============================================================ */
+  function playerToken() {
+    try {
+      let t = localStorage.getItem('ge-player-token');
+      if (!t || t.length < 12) {
+        const bytes = new Uint8Array(16);
+        if (crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+        else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+        t = 'ge_' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem('ge-player-token', t);
+      }
+      return t;
+    } catch (_) {
+      return 'ge_anon_' + String(Date.now());
+    }
+  }
+
+  function apiRoot() {
+    try {
+      if (GE.app && typeof GE.app.apiRoot === 'function') return GE.app.apiRoot();
+    } catch (_) { /* ignore */ }
+    try {
+      if (GE.llmConfig && typeof GE.llmConfig.worldBase === 'function') {
+        const w = GE.llmConfig.worldBase();
+        if (w) return w;
+      }
+    } catch (_) { /* ignore */ }
+    return '';
+  }
+
+  function runId() {
+    try {
+      if (GE.app && typeof GE.app.runId === 'function') return GE.app.runId();
+    } catch (_) { /* ignore */ }
+    return 'local-seed';
+  }
+
+  async function apiJson(method, path, body) {
+    const headers = {
+      Accept: 'application/json',
+      'X-Player-Token': playerToken()
+    };
+    if (body != null) headers['Content-Type'] = 'application/json';
+    const res = await fetch(`${apiRoot()}${path}`, {
+      method,
+      headers,
+      body: body != null ? JSON.stringify(body) : undefined,
+      cache: 'no-store'
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
+  }
+
+  async function ensureSeat(civId) {
+    const me = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/me`);
+    if (me.ok && me.data && me.data.seat) return me.data;
+    const claim = await apiJson('POST', `/api/v1/runs/${encodeURIComponent(runId())}/seats/claim`, {
+      playerToken: playerToken(),
+      civId: civId || 'dawn',
+      displayName: '旅人'
+    });
+    return claim.data;
+  }
+
   function openEdict() {
+    const civs = (D().civs || []).map(c => ({ id: c.id, name: c.name, color: c.color }));
     GE.modal.open({
-      id: 'edict', title: '神谕', subtitle: '以至高权限干涉世界 · 所言即成真',
-      icon: 'hand', accent: '#8b7cf6', size: 'lg',
+      id: 'edict',
+      title: '神谕',
+      subtitle: '点数购档 · 合规干涉 · 禁止点名伤害他方文明',
+      icon: 'hand',
+      accent: '#8b7cf6',
+      size: 'lg',
       body: `
-        <div class="panel" style="border-left:3px solid var(--violet);margin-bottom:16px">
-          <p class="prose">以「神谕」之名所言之事，将无视一切限制直接成真——降下天灾、篡改记忆、复活死者、扭转因果。世界将忠实呈现改变后的连锁反应，不质疑，不劝阻。</p>
+        <div class="panel" style="border-left:3px solid var(--violet);margin-bottom:14px">
+          <p class="prose">以神谕点数购买结构化干涉。开局 3 点；每 50 世界年积 1 点。天灾将波及<strong>包括己方在内</strong>的所有文明。</p>
+          <div class="mono" id="oracle-hud" style="margin-top:8px;font-size:12px;color:var(--tx-2)">读取席位中…</div>
         </div>
-        ${secHead('hand', '颂出神谕')}
-        <div style="display:flex;gap:8px">
-          <input id="edict-input" class="edict-input" placeholder="神谕：【让东大陆沉没】…" autocomplete="off">
-          <button class="btn btn-gold" id="edict-send">${ic('send', 14)}降下</button>
+        ${secHead('flag', '绑定文明')}
+        <select id="oracle-civ" class="edict-input" style="width:100%;margin-bottom:12px">
+          ${civs.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}
+        </select>
+        ${secHead('sparkle', '档位')}
+        <div class="card-grid cols-3" id="oracle-tiers" style="margin-bottom:12px">
+          ${[
+            { t: 1, n: '国策/思潮', d: '1 点 · 改写己方长期取向' },
+            { t: 2, n: '神物', d: '2 点 · 赐予己方器物' },
+            { t: 3, n: '三选一', d: '3 点 · 人物/外交/科技' },
+            { t: 4, n: '事件', d: '4 点 · 可全域同检' },
+            { t: 5, n: '命运神谕', d: '5 点 · 己方命运级' }
+          ].map(x => `
+            <button type="button" class="panel oracle-tier" data-tier="${x.t}" style="text-align:left;cursor:pointer">
+              <div style="font-weight:700;color:var(--tx-0)">${x.t} · ${esc(x.n)}</div>
+              <div class="tx2" style="font-size:11px;margin-top:4px">${esc(x.d)}</div>
+            </button>`).join('')}
         </div>
-        ${secHead('sparkle', '神谕范例')}
-        <div class="card-grid cols-2">
-          ${['让深渊的『低语』显形', '赐予苏砚一次顿悟', '在奥瑞利安降下三年大旱', '复活一位已故的英雄'].map(s =>
-            `<button class="panel edict-eg" style="text-align:left;cursor:pointer;font-size:12px;color:var(--tx-1)">${esc(s)}</button>`).join('')}
+        <div id="oracle-form"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;flex-wrap:wrap">
+          <button class="btn" id="oracle-claim">认领/刷新席位</button>
+          <button class="btn" id="oracle-clock">开始走时</button>
+          <button class="btn btn-gold" id="oracle-send">${ic('send', 14)}降下</button>
         </div>`,
       onOpen: (body) => {
-        const input = body.querySelector('#edict-input');
-        const send = () => {
-          const v = input.value.trim();
-          if (!v) { GE.toast.warn('神谕为空', '请先颂出你的意志。'); return; }
+        let tier = 1;
+        let sub = 'character';
+        let clockPaused = true;
+        const hud = body.querySelector('#oracle-hud');
+        const form = body.querySelector('#oracle-form');
+        const civSel = body.querySelector('#oracle-civ');
+        const clockBtn = body.querySelector('#oracle-clock');
+
+        function renderForm() {
+          if (tier === 1) {
+            form.innerHTML = `
+              ${secHead('scroll', '国策')}
+              <input id="o-name" class="edict-input" placeholder="国策名称（2～12字）" style="width:100%;margin-bottom:8px">
+              <textarea id="o-text" class="edict-input" rows="3" placeholder="国策内容（勿点名加害他方）" style="width:100%"></textarea>
+              <select id="o-focus" class="edict-input" style="width:100%;margin-top:8px">
+                ${['stabilize', 'research', 'explore', 'expand', 'military', 'faith', 'trade'].map(f =>
+                  `<option value="${f}">${f}</option>`).join('')}
+              </select>`;
+          } else if (tier === 2) {
+            form.innerHTML = `
+              ${secHead('sparkle', '神物')}
+              <input id="o-name" class="edict-input" placeholder="神物名称" style="width:100%;margin-bottom:8px">
+              <input id="o-nature" class="edict-input" placeholder="性质简述" style="width:100%">`;
+          } else if (tier === 3) {
+            form.innerHTML = `
+              ${secHead('users', '3 点三选一')}
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                ${[['character', '人物'], ['diplomacy', '外交'], ['tech', '科技']].map(([k, lab]) =>
+                  `<button type="button" class="btn o-sub" data-sub="${k}">${lab}</button>`).join('')}
+              </div>
+              <div id="o-sub-form"></div>`;
+            form.querySelectorAll('.o-sub').forEach(b => b.addEventListener('click', () => {
+              sub = b.getAttribute('data-sub');
+              renderSub();
+            }));
+            renderSub();
+          } else if (tier === 4) {
+            form.innerHTML = `
+              ${secHead('bolt', '事件')}
+              <p class="tx2" style="font-size:11px;margin-bottom:6px">天灾必须无点名；将影响包括己方在内的所有文明。</p>
+              <input id="o-name" class="edict-input" placeholder="事件标题" style="width:100%;margin-bottom:8px">
+              <textarea id="o-text" class="edict-input" rows="3" placeholder="事件描述（勿写「给某某降下…」）" style="width:100%"></textarea>
+              <select id="o-kind" class="edict-input" style="width:100%;margin-top:8px">
+                <option value="omen">预兆</option>
+                <option value="blessing">祝福</option>
+                <option value="disaster">天灾（全域）</option>
+                <option value="discovery">发现</option>
+              </select>`;
+          } else {
+            form.innerHTML = `
+              ${secHead('hand', '命运神谕')}
+              <textarea id="o-text" class="edict-input" rows="4" placeholder="己方命运级意志（点名加害将被拒收）" style="width:100%"></textarea>`;
+          }
+        }
+
+        function renderSub() {
+          const box = form.querySelector('#o-sub-form');
+          if (!box) return;
+          if (sub === 'character') {
+            box.innerHTML = `
+              <input id="o-stance" class="edict-input" placeholder="新立场" style="width:100%;margin-bottom:8px">
+              <input id="o-motive" class="edict-input" placeholder="新动机" style="width:100%">`;
+          } else if (sub === 'diplomacy') {
+            box.innerHTML = `
+              <select id="o-intent" class="edict-input" style="width:100%;margin-bottom:8px">
+                <option value="seek_peace">求和平</option>
+                <option value="open_trade">开放贸易</option>
+                <option value="declare_hostility">宣示敌意（不写死胜负）</option>
+                <option value="isolate">孤立自守</option>
+              </select>
+              <input id="o-reason" class="edict-input" placeholder="公开理由" style="width:100%">`;
+          } else {
+            box.innerHTML = `
+              <select id="o-mode" class="edict-input" style="width:100%">
+                <option value="accelerate">加速研究</option>
+                <option value="focus_lock">锁定路线</option>
+              </select>`;
+          }
+        }
+
+        function buildPayload() {
+          const civId = civSel.value;
+          if (tier === 1) {
+            return {
+              tier: 1,
+              civId,
+              policyName: body.querySelector('#o-name')?.value || '新国策',
+              policyText: body.querySelector('#o-text')?.value || '以神谕重塑己方道路。',
+              focus: body.querySelector('#o-focus')?.value || 'stabilize'
+            };
+          }
+          if (tier === 2) {
+            return {
+              tier: 2,
+              civId,
+              relic: {
+                name: body.querySelector('#o-name')?.value || '神谕赐物',
+                nature: body.querySelector('#o-nature')?.value || '超凡器物'
+              }
+            };
+          }
+          if (tier === 3) {
+            const base = { tier: 3, sub, civId };
+            if (sub === 'character') {
+              base.ops = [];
+              const st = body.querySelector('#o-stance')?.value;
+              const mo = body.querySelector('#o-motive')?.value;
+              if (st) base.ops.push({ op: 'stance', value: st });
+              if (mo) base.ops.push({ op: 'motive', value: mo });
+              if (!base.ops.length) base.ops.push({ op: 'stance', value: '神谕校准后的新立场' });
+            } else if (sub === 'diplomacy') {
+              base.stance = {
+                intent: body.querySelector('#o-intent')?.value || 'seek_peace',
+                publicReason: body.querySelector('#o-reason')?.value || '神谕指引'
+              };
+            } else {
+              base.tech = { mode: body.querySelector('#o-mode')?.value || 'accelerate', years: 10, strength: '中' };
+              base.narrative = '神谕偏转科技';
+            }
+            return base;
+          }
+          if (tier === 4) {
+            const kind = body.querySelector('#o-kind')?.value || 'omen';
+            return {
+              tier: 4,
+              civId,
+              event: {
+                title: body.querySelector('#o-name')?.value || '神谕事件',
+                seed: body.querySelector('#o-text')?.value || '',
+                kind,
+                scope: kind === 'disaster' ? 'global' : 'civ_self',
+                intensity: '中'
+              }
+            };
+          }
+          return {
+            tier: 5,
+            civId,
+            oracleText: body.querySelector('#o-text')?.value || '愿吾族得见长夜后的第一缕光。'
+          };
+        }
+
+        async function refreshHud() {
+          try {
+            const st = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/oracle`);
+            if (st.ok) {
+              const p = st.data.points;
+              const n = st.data.nextPointInYears;
+              const paused = st.data.clock && st.data.clock.paused;
+              clockPaused = !!paused;
+              hud.textContent = `点数 ${p} / 15 · 下一滴约 ${n == null ? '—' : n} 年 · ${paused ? '已暂停' : '走时中'} · 文明 ${st.data.seat?.civId || '—'}`;
+              if (clockBtn) clockBtn.textContent = paused ? '开始走时' : '暂停世界';
+              if (st.data.seat?.civId) civSel.value = st.data.seat.civId;
+              try {
+                const el = document.getElementById('ws-oracle-num');
+                if (el) el.textContent = String(p);
+              } catch (_) { /* ignore */ }
+            } else {
+              hud.textContent = '尚未认领文明 · 请选择文明后点「认领/刷新席位」';
+            }
+          } catch (err) {
+            hud.textContent = '无法连接神谕服务：' + String(err && err.message || err);
+          }
+        }
+
+        body.querySelectorAll('.oracle-tier').forEach(btn => {
+          btn.addEventListener('click', () => {
+            tier = Number(btn.getAttribute('data-tier')) || 1;
+            body.querySelectorAll('.oracle-tier').forEach(b => {
+              b.style.outline = b === btn ? '1px solid var(--gold)' : '';
+            });
+            renderForm();
+          });
+        });
+        body.querySelector('.oracle-tier')?.click();
+
+        body.querySelector('#oracle-claim').addEventListener('click', async () => {
+          const r = await ensureSeat(civSel.value);
+          if (r && (r.ok || r.seat)) {
+            GE.toast.show({ type: 'info', icon: 'flag', title: '席位', msg: `已绑定 ${(r.seat && r.seat.civId) || civSel.value} · 点 ${(r.seat && r.seat.oraclePoints) != null ? r.seat.oraclePoints : '—'}` });
+            refreshHud();
+          } else {
+            GE.toast.warn('认领失败', (r && (r.message || r.error)) || '未知错误');
+          }
+        });
+
+        if (clockBtn) clockBtn.addEventListener('click', async () => {
+          const r = await setServerClockPaused(!clockPaused, civSel.value);
+          if (!r || !r.ok) {
+            GE.toast.warn('时钟控制失败', (r && (r.message || r.error)) || '需要 owner 席位');
+            refreshHud();
+            return;
+          }
+          GE.toast.show({
+            type: 'info',
+            icon: r.clock && r.clock.paused ? 'pause' : 'play',
+            title: r.clock && r.clock.paused ? '世界已暂停' : '世界开始走时',
+            msg: r.clock && r.clock.paused ? '现实时钟与神谕积点已暂停。' : '服务端 WorldClock 已启动，满 5 年或有神谕队列将自动收敛。'
+          });
+          refreshHud();
+        });
+
+        body.querySelector('#oracle-send').addEventListener('click', async () => {
+          await ensureSeat(civSel.value);
+          const payload = buildPayload();
+          const res = await apiJson('POST', `/api/v1/runs/${encodeURIComponent(runId())}/oracle`, payload);
+          if (!res.ok) {
+            GE.toast.warn('神谕被拒', res.data.message || res.data.error || `HTTP ${res.status}`);
+            refreshHud();
+            return;
+          }
           GE.modal.close();
-          GE.toast.show({ type: 'agent', icon: 'hand', title: '神谕已降下', msg: `「${esc(v)}」—— 世界开始随之改变。` });
-          setTimeout(() => GE.app.runDeduction({ edict: v }), 900);
-        };
-        body.querySelector('#edict-send').addEventListener('click', send);
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
-        body.querySelectorAll('.edict-eg').forEach(b => b.addEventListener('click', () => { input.value = '神谕：【' + b.textContent + '】'; input.focus(); }));
-        input.focus();
+          GE.toast.show({
+            type: 'agent',
+            icon: 'hand',
+            title: '神谕已支付',
+            msg: `消耗 ${res.data.cost} 点 · 余 ${res.data.pointsLeft} · 将在下一轮推演 Drain 生效`
+          });
+          // 自动推一轮以 Drain（rules 路径）
+          setTimeout(() => {
+            if (GE.app && GE.app.runDeduction) GE.app.runDeduction({ agentMode: 'rules_only' });
+          }, 600);
+        });
+
+        refreshHud();
       }
     });
   }
@@ -1414,10 +1725,37 @@ GE.panels = (function () {
     }
   }
 
+  async function refreshOracleHud() {
+    try {
+      const st = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/oracle`);
+      const el = document.getElementById('ws-oracle-num');
+      if (el) el.textContent = st.ok ? String(st.data.points) : '—';
+      return st;
+    } catch (_) {
+      const el = document.getElementById('ws-oracle-num');
+      if (el) el.textContent = '—';
+      return null;
+    }
+  }
+
+  async function setServerClockPaused(paused, civId) {
+    try {
+      const seat = await ensureSeat(civId || 'dawn');
+      if (!seat || (!seat.ok && !seat.seat)) return seat || { ok: false, error: 'NO_SEAT' };
+      const r = await apiJson('POST', `/api/v1/runs/${encodeURIComponent(runId())}/clock/pause`, {
+        playerToken: playerToken(),
+        paused: !!paused
+      });
+      return Object.assign({ ok: r.ok, status: r.status }, r.data || {});
+    } catch (err) {
+      return { ok: false, error: String(err && err.message || err) };
+    }
+  }
+
   /* ============ 导出 ============ */
   return {
     openCiv, openLeader, openStation, openPlanetInfo, openChronicle,
     openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openLlmLogs, openWarehouse, openRegion,
-    playMonologueReel
+    playMonologueReel, refreshOracleHud, setServerClockPaused, playerToken, ensureSeat
   };
 })();

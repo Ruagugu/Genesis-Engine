@@ -308,10 +308,23 @@ GE.territory = (function () {
       const kind = d.kind || '';
       if (!civId) return;
       if (kind === 'policy' || kind === 'explore.body' || d.actionType === 'expand_softly' || d.actionType === 'expand_frontier') {
+        const civ = GE.data.civs.find(c => c.id === civId) || {};
+        const st = civ.stats || {};
+        const expandStat = Number(st.扩张) || 5;
+        const pop = Math.max(0.5, Number(st.人口) || 1);
+        const econ = Number(st.经济) || 3;
+        const popFactor = Math.min(3, Math.log2(1 + pop));
+        const budget = Math.max(
+          1,
+          Math.min(
+            CAPS.maxExpandPerCiv,
+            1 + Math.floor(expandStat / 14) + Math.floor(popFactor) + (econ >= 8 ? 1 : 0)
+          )
+        );
         events.push({
           type: 'expand',
           civId,
-          budget: Math.max(1, Math.min(CAPS.maxExpandPerCiv, 2 + Math.floor((Number((GE.data.civs.find(c => c.id === civId) || {}).stats?.扩张) || 5) / 20))),
+          budget,
           mode: 'frontier',
           reason: d.decision || d.actionReason || 'policy_expand',
           source: d.source || 'rules'
@@ -324,13 +337,20 @@ GE.territory = (function () {
         if (rel) {
           const other = rel.a === civId ? rel.b : rel.a;
           const tension = Number(rel.tension) || 0;
-          if (tension >= 40 || /敌|对峙|戒备|威慑|冷战/.test(rel.state || '') || /敌|威慑|戒备/.test(d.decision || '')) {
+          const atk = (GE.data.civs.find(c => c.id === civId) || {}).stats || {};
+          const def = (GE.data.civs.find(c => c.id === other) || {}).stats || {};
+          const atkPower = (Number(atk.军力) || 4) + (Number(atk.人口) || 1) * 0.35;
+          const defPower = (Number(def.军力) || 4) + (Number(def.人口) || 1) * 0.35;
+          const powerRatio = atkPower / Math.max(1, defPower);
+          const canPress = powerRatio >= 0.75 || tension >= 55 || kind === 'military';
+          if ((tension >= 35 || /敌|对峙|戒备|威慑|冷战/.test(rel.state || '') || /敌|威慑|戒备/.test(d.decision || '') || kind === 'military') && canPress) {
+            const powerBonus = powerRatio >= 1.4 ? 2 : powerRatio >= 1.05 ? 1 : 0;
             events.push({
               type: 'annex',
               attackerId: civId,
               defenderId: other,
-              budget: Math.max(1, Math.min(CAPS.maxAnnexPerPair, 2 + Math.floor(tension / 25))),
-              intensity: tension >= 70 ? 2 : 1,
+              budget: Math.max(1, Math.min(CAPS.maxAnnexPerPair, 1 + Math.floor(tension / 28) + powerBonus + Math.floor((Number(atk.军力) || 0) / 25))),
+              intensity: powerRatio >= 1.3 || tension >= 70 ? 2 : 1,
               reason: d.decision || 'military_pressure',
               source: d.source || 'rules'
             });

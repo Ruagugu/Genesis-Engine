@@ -70,6 +70,86 @@ GE.app = (function () {
   let elapsed = 0;
   let raf = 0;
   let resizeTimer = 0;
+  let oracleEvents = null;
+
+  function playerToken() {
+    try {
+      let t = localStorage.getItem('ge-player-token');
+      if (!t || t.length < 12) {
+        const bytes = new Uint8Array(16);
+        if (crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+        else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+        t = 'ge_' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem('ge-player-token', t);
+      }
+      return t;
+    } catch (_) { return null; }
+  }
+
+  function syncPlayFromServerClock(clock) {
+    if (!clock || clock.paused == null) return;
+    state.playing = !clock.paused;
+    const b = document.getElementById('tb-play');
+    if (b) {
+      b.setAttribute('aria-pressed', String(state.playing));
+      b.innerHTML = GE.icons.icon(state.playing ? 'pause' : 'play', 16);
+      b.dataset.tip = state.playing ? '暂停时间' : '继续时间';
+    }
+  }
+
+  function connectOracleEvents() {
+    if (!window.EventSource || mockDeductionEnabled()) return;
+    try {
+      if (oracleEvents) oracleEvents.close();
+      const url = `${apiRoot()}/api/v1/runs/${encodeURIComponent(runId())}/events?playerToken=${encodeURIComponent(playerToken() || '')}`;
+      oracleEvents = new EventSource(url);
+      oracleEvents.addEventListener('ready', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          syncPlayFromServerClock(x.clock);
+          if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud();
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('year.tick', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          if (x.year != null) {
+            state.simulatedYear = x.year;
+            GE.data.world.年数 = x.year;
+            const el = document.getElementById('ws-year-num');
+            if (el) el.textContent = GE.fmt.num(x.year);
+          }
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('oracle.points', () => {
+        try { if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud(); } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('clock.pause', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          syncPlayFromServerClock(x.clock || { paused: x.paused });
+          if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud();
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('oracle.applied', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          GE.toast.show({ type: 'agent', icon: 'hand', title: '神谕已生效', msg: x.summary || '神谕补丁已写入世界。' });
+          if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud();
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('round.progress', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          if (x.phase === 'start') GE.toast.info('自动推演启动', 'WorldClock 已触发服务端规则收敛。');
+          if (x.phase === 'error') GE.toast.warn('自动推演失败', x.error || '未知错误');
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('round.done', () => {
+        try { if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud(); } catch (_) { /* ignore */ }
+      });
+    } catch (_) { /* EventSource unavailable / server optional */ }
+  }
 
   /* ============ 启动 ============ */
   async function boot() {
@@ -100,16 +180,16 @@ GE.app = (function () {
     }
 
     if (GE.surfaces) GE.surfaces.init();
-    hydrateWorldStrip();
-    renderCivDock();
+    // 先恢复推演控制台，再画侧栏；http 快照已含 log 时以服务端为准
     restoreDeductionConsole();
-    syncFavoritesFromLeaders();
-    try {
-      const dockCount = document.getElementById('dock-count');
-      if (dockCount) dockCount.textContent = (GE.data.civs || []).length;
-    } catch (_) { /* ignore */ }
+    state.deductionRound = (GE.data.deduction && GE.data.deduction.log && GE.data.deduction.log[0] && GE.data.deduction.log[0].round) || state.deductionRound || 0;
+    state.simulatedYear = (GE.data.world && GE.data.world.年数) || state.simulatedYear || 0;
+    hydrateWorldStrip();
+    refreshCivChrome();
     bindShell();
     GE.notify.bind();
+    connectOracleEvents();
+    try { if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud(); } catch (_) { /* ignore */ }
 
     const stages = [
       ['校验创世契约 …', 18],
@@ -146,7 +226,6 @@ GE.app = (function () {
     bootEl.classList.add('done');
     state.started = true;
     loadAutoDeduceSettings();
-    pushInitialNotifications();
     cancelAnimationFrame(raf);
     last = performance.now();
     raf = requestAnimationFrame(frame);
@@ -279,6 +358,9 @@ GE.app = (function () {
   function syncFavoritesFromLeaders() {
     GE.data.favorites = Array.isArray(GE.data.favorites) ? GE.data.favorites : [];
     const byId = new Map(GE.data.favorites.map(f => [f.id, f]));
+    const previousLeaderIds = new Set(
+      GE.data.favorites.filter(f => f && f.civId).map(f => f.id)
+    );
     (GE.data.civs || []).forEach(civ => {
       const L = (civ.leaders || [])[0];
       if (!L || !L.id) return;
@@ -302,9 +384,28 @@ GE.app = (function () {
         byId.set(L.id, entry);
       }
     });
-    // 去掉已不存在的旧领袖条目（保留手动收藏时也可用 id 匹配）
-    const live = new Set((GE.data.civs || []).flatMap(c => (c.leaders || []).map(l => l.id)));
-    GE.data.favorites = GE.data.favorites.filter(f => !f.civId || live.has(f.id) || !/^.*-g\d+$/.test(String(f.id || '')));
+    // 领袖收藏只保留仍在任者；无 civId 的手动条目保留
+    const live = new Set((GE.data.civs || []).flatMap(c => (c.leaders || []).map(l => l && l.id).filter(Boolean)));
+    GE.data.favorites = GE.data.favorites.filter(f => !f.civId || live.has(f.id));
+    return {
+      changed: [...live].some(id => !previousLeaderIds.has(id)) ||
+        [...previousLeaderIds].some(id => !live.has(id))
+    };
+  }
+
+  function refreshCivChrome() {
+    try {
+      syncFavoritesFromLeaders();
+      renderCivDock();
+      const dockCount = document.getElementById('dock-count');
+      if (dockCount) dockCount.textContent = (GE.data.civs || []).length;
+      // 若右侧上下文正开着某文明，领袖换代后一并刷新
+      if (state.selectedCiv && ctxPanel && !ctxPanel.hidden) {
+        showCivContext(state.selectedCiv);
+      }
+    } catch (err) {
+      console.warn('[创世引擎] refresh civ chrome', err);
+    }
   }
 
   const DEDUCE_PERSIST_KEY = 'ge-deduction-console-v1';
@@ -329,35 +430,40 @@ GE.app = (function () {
 
   function restoreDeductionConsole() {
     try {
+      GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
+      const serverLog = Array.isArray(GE.data.deduction.log) ? GE.data.deduction.log : [];
+      // 服务端快照已有日志：以服务端为准（run 落盘后的权威存档）
+      if (serverLog.length) {
+        if (Number.isFinite(Number(serverLog[0] && serverLog[0].round))) {
+          state.deductionRound = Number(serverLog[0].round);
+        }
+        return false;
+      }
       const raw = localStorage.getItem(DEDUCE_PERSIST_KEY);
       if (!raw) return false;
       const saved = JSON.parse(raw);
-      if (!saved || !Array.isArray(saved.log)) return false;
-      GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
-      // 仅当当前 log 为空（如创世重置后）才用本地缓存恢复，避免覆盖更新的服务端状态
-      if (!GE.data.deduction.log || !GE.data.deduction.log.length) {
-        GE.data.deduction.log = saved.log;
-        GE.data.deduction.pendingDecisions = saved.pendingDecisions || [];
-        GE.data.deduction.lastMonologueReel = saved.lastMonologueReel || [];
-        if (Array.isArray(saved.lenses) && saved.lenses.length) GE.data.deduction.lenses = saved.lenses;
-        if (Number.isFinite(Number(saved.deductionRound))) state.deductionRound = Number(saved.deductionRound);
-        return true;
+      if (!saved || !Array.isArray(saved.log) || !saved.log.length) return false;
+      const worldYear = Number(GE.data.world && GE.data.world.年数) || 0;
+      const savedYear = Number(saved.year) || 0;
+      // 服务端已重置到创世元年时，丢弃浏览器里上一局的推演缓存
+      if (worldYear <= 1 && savedYear > 2) {
+        try { localStorage.removeItem(DEDUCE_PERSIST_KEY); } catch (_) { /* ignore */ }
+        return false;
       }
-      return false;
+      // 仅在服务端/种子 log 为空时用浏览器缓存兜底
+      GE.data.deduction.log = saved.log;
+      GE.data.deduction.pendingDecisions = saved.pendingDecisions || [];
+      GE.data.deduction.lastMonologueReel = saved.lastMonologueReel || [];
+      if (Array.isArray(saved.lenses) && saved.lenses.length) GE.data.deduction.lenses = saved.lenses;
+      if (Number.isFinite(Number(saved.deductionRound))) state.deductionRound = Number(saved.deductionRound);
+      else if (Number.isFinite(Number(saved.log[0] && saved.log[0].round))) {
+        state.deductionRound = Number(saved.log[0].round);
+      }
+      return true;
     } catch (err) {
       console.warn('[创世引擎] restore deduction console', err);
       return false;
     }
-  }
-
-  function pushInitialNotifications() {
-    const initial = [
-      { type: 'critical', icon: 'skull', title: '暗线异动', msg: '深渊低语中反复出现「收割」一词，来源未知。' },
-      { type: 'warn', icon: 'flask', title: '亚光速引擎点火在即', msg: '苏砚提交提前试车申请，星枢院尚未裁决。' },
-      { type: 'agent', icon: 'chip', title: '文明 Agent 已上线', msg: '5 个文明、7 名关键人物已接入决策队列。' }
-    ];
-    initial.slice().reverse().forEach(n => GE.notify.push({ ...n, time: Date.now() }));
-    setTimeout(() => GE.toast.show(initial[1]), 700);
   }
 
   /* ============ 视图生命周期 ============ */
@@ -548,6 +654,8 @@ GE.app = (function () {
     document.getElementById('btn-favorites').addEventListener('click', () => GE.panels.openFavorites());
     document.getElementById('ws-era').addEventListener('click', () => GE.panels.openWorld());
     document.getElementById('ws-year').addEventListener('click', () => GE.panels.openDeduction());
+    const wsOracle = document.getElementById('ws-oracle');
+    if (wsOracle) wsOracle.addEventListener('click', () => GE.panels.openEdict());
     document.getElementById('ws-energy').addEventListener('click', () => GE.panels.openCodex('scale'));
     document.getElementById('ws-civs').addEventListener('click', () => GE.panels.openWorld());
     document.getElementById('ws-planet').addEventListener('click', () => {
@@ -599,6 +707,23 @@ GE.app = (function () {
     b.innerHTML = GE.icons.icon(state.playing ? 'pause' : 'play', 16);
     b.dataset.tip = state.playing ? '暂停时间' : '继续时间';
     GE.toast.show({ type: 'info', icon: state.playing ? 'play' : 'pause', title: state.playing ? '时间继续流逝' : '世界已暂停', msg: state.playing ? `当前流速 ${state.speeds[state.speedIndex].toFixed(2).replace(/\.00$/, '')}×` : '星轨与世界推演时间已冻结。' });
+
+    // 阶段 D：顶部播放键同步服务端 WorldClock，真正启停自动推演。
+    if (!mockDeductionEnabled() && typeof location !== 'undefined' && /^https?:$/i.test(location.protocol || '')) {
+      Promise.resolve()
+        .then(() => GE.panels && GE.panels.setServerClockPaused
+          ? GE.panels.setServerClockPaused(!state.playing, state.selectedCiv || 'dawn')
+          : null)
+        .then(r => {
+          if (!r) return;
+          if (!r.ok) {
+            GE.toast.warn('服务端时钟未同步', r.message || r.error || '请先在神谕面板认领 owner 席位。');
+            return;
+          }
+          if (GE.panels && GE.panels.refreshOracleHud) GE.panels.refreshOracleHud();
+        })
+        .catch(err => GE.toast.warn('服务端时钟未同步', String(err && err.message || err)));
+    }
   }
 
   function changeSpeed(delta) {
@@ -625,7 +750,7 @@ GE.app = (function () {
 
   function showCivContext(id) {
     const c = GE.data.civs.find(x => x.id === id); if (!c) return;
-    const leader = c.leaders[0];
+    const leader = (c.leaders && c.leaders[0]) || { name: '未名', title: '暂无领袖', age: '—' };
     ctxInner.innerHTML = `
       <header class="ctx-head" style="--ctx-c:${c.color}">
         <button class="ctx-close" id="ctx-close-civ" aria-label="关闭详情">${GE.icons.icon('x', 14)}</button>
@@ -849,6 +974,10 @@ GE.app = (function () {
     }
     const yearEl = document.getElementById('ws-year-num');
     if (yearEl) yearEl.textContent = GE.fmt.num(state.simulatedYear);
+    // 神谕点数 HUD（异步刷新，不阻塞推演结果）
+    try {
+      if (GE.panels && typeof GE.panels.refreshOracleHud === 'function') GE.panels.refreshOracleHud();
+    } catch (_) { /* ignore */ }
 
     const monologueReel = Array.isArray(result.monologueReel) && result.monologueReel.length
       ? result.monologueReel
@@ -980,16 +1109,70 @@ GE.app = (function () {
 
       if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
       else if (GE.worldState && GE.worldState.advanceTurn) GE.worldState.advanceTurn();
-      // 服务端 patches：科技 / 关系 / 立场
+      // 服务端 patches：科技 / 国策·思潮 / 关系 / 立场
       try {
         const techPatches = result.patchesSummary && result.patchesSummary.tech;
         if (Array.isArray(techPatches)) {
           techPatches.forEach(p => {
             const civ = (GE.data.civs || []).find(c => c.id === p.civId);
-            if (!civ || !civ.科技树) return;
-            if (p.node && civ.科技树.节点 && civ.科技树.节点[p.node]) {
-              civ.科技树.节点[p.node].进度 = p.progress;
+            if (!civ) return;
+            if (!civ.科技树 || typeof civ.科技树 !== 'object') {
+              civ.科技树 = { 文明等级: Number(civ.level) || 0, 下一阶段: 0, 节点: {} };
             }
+            if (!civ.科技树.节点 || typeof civ.科技树.节点 !== 'object') civ.科技树.节点 = {};
+            if (p.level != null) {
+              civ.科技树.文明等级 = p.level;
+              civ.level = p.level;
+            }
+            if (p.nextStage != null) civ.科技树.下一阶段 = p.nextStage;
+            if (p.node) {
+              const nodes = civ.科技树.节点;
+              if (!nodes[p.node]) {
+                nodes[p.node] = {
+                  层级: 0,
+                  描述: p.desc || '',
+                  前置: '无',
+                  状态: p.status || '可研究',
+                  进度: p.progress != null ? p.progress : 0
+                };
+              } else {
+                if (p.progress != null) nodes[p.node].进度 = p.progress;
+                if (p.status) nodes[p.node].状态 = p.status;
+                if (p.desc) nodes[p.node].描述 = p.desc;
+              }
+              if (p.unlocked) {
+                nodes[p.node].状态 = '已解锁';
+                nodes[p.node].进度 = 100;
+              }
+            }
+          });
+        }
+        const civPatches = result.patchesSummary && result.patchesSummary.civs;
+        if (Array.isArray(civPatches)) {
+          civPatches.forEach(p => {
+            if (!p || !p.civId) return;
+            const civ = (GE.data.civs || []).find(c => c.id === p.civId);
+            if (!civ) return;
+            if (p.policy) {
+              civ.目前国策 = Object.assign({}, civ.目前国策 || {}, p.policy);
+            }
+            if (p.思潮) civ.思潮 = p.思潮;
+            if (p.国民理念) civ.国民理念 = p.国民理念;
+            if (p.stage) {
+              civ.stage = p.stage;
+              civ.文明阶段 = p.stage;
+            }
+            if (p.level != null) {
+              civ.level = p.level;
+              if (!civ.科技树) civ.科技树 = { 文明等级: p.level, 下一阶段: 0, 节点: {} };
+              else civ.科技树.文明等级 = p.level;
+            }
+            if (p.nextStage != null && civ.科技树) civ.科技树.下一阶段 = p.nextStage;
+            if (p.stats && typeof p.stats === 'object') {
+              civ.stats = Object.assign({}, civ.stats || {}, p.stats);
+            }
+            if (p.capital) civ.capital = p.capital;
+            if (Array.isArray(p.capabilities)) civ.capabilities = p.capabilities.slice();
           });
         }
         const relPatches = result.patchesSummary && result.patchesSummary.relations;
@@ -1045,22 +1228,11 @@ GE.app = (function () {
           });
         }
       } catch (_) { /* ignore */ }
-      // 领袖可能继承/替换：刷新右侧文明列表与收藏夹
-      try {
-        syncFavoritesFromLeaders();
-        renderCivDock();
-        const dockCount = document.getElementById('dock-count');
-        if (dockCount) dockCount.textContent = (GE.data.civs || []).length;
-      } catch (err) {
-        console.warn('[创世引擎] refresh civ dock', err);
-      }
-      const dawn = GE.data.civs && GE.data.civs.find(c => c.id === 'dawn');
-      if (dawn && dawn.科技树) {
-        const cardBar = document.querySelector('#civ-card-dawn .civ-lvbar i');
-        const cardNum = document.querySelector('#civ-card-dawn .civ-lvnum');
-        if (cardBar) cardBar.style.width = (dawn.科技树.下一阶段 || 0) + '%';
-        if (cardNum) cardNum.textContent = (dawn.科技树.下一阶段 || 0) + '%';
-      }
+      // 领袖可能继承/替换：刷新左侧文明列表、收藏夹与已打开的上下文
+      refreshCivChrome();
+    } else {
+      // 神谕路径也可能推进年龄；至少同步侧栏
+      refreshCivChrome();
     }
 
     persistDeductionConsole();
@@ -1262,10 +1434,7 @@ GE.app = (function () {
       if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
       else GE.worldState.advanceTurn();
     }
-    try {
-      syncFavoritesFromLeaders();
-      renderCivDock();
-    } catch (_) { /* ignore */ }
+    refreshCivChrome();
     persistDeductionConsole();
     return log;
   }
@@ -1426,7 +1595,9 @@ GE.app = (function () {
     setAutoDeduce,
     settings,
     state,
-    renderer
+    renderer,
+    runId,
+    apiRoot
   };
 })();
 

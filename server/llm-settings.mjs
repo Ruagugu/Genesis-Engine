@@ -9,8 +9,10 @@ import { fileURLToPath } from 'url';
 import { normalizeBase, llmConfigured } from './llm-provider.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DATA_DIR = path.join(root, 'data');
-const STORE_PATH = path.join(DATA_DIR, 'llm-settings.json');
+const STORE_PATH = process.env.GE_LLM_SETTINGS_PATH
+  ? path.resolve(process.env.GE_LLM_SETTINGS_PATH)
+  : path.join(root, 'data', 'llm-settings.json');
+const DATA_DIR = path.dirname(STORE_PATH);
 
 const DEFAULTS = {
   enabled: false,
