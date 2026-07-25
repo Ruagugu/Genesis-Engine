@@ -10,8 +10,7 @@ test.describe('Phase B read-only snapshot API', () => {
       apiVersion: 'v1',
       schemaVersion: 1,
       phase: 'C',
-      writeOps: true,
-      agentMode: 'rules_only'
+      writeOps: true
     }));
   });
 
@@ -117,7 +116,7 @@ test.describe('Snapshot providers in browser', () => {
 
     expect(report.mode).toBe('local');
     expect(report.schema).toBe(1);
-    expect(report.worldYear).toBe(1247);
+    expect(report.worldYear).toBe(1);
     expect(report.landable).toEqual(expect.arrayContaining(['gaiya', 'yinhui']));
     expect(report.bodyId).toBe('gaiya');
     expect(report.surfaceId).toBe('gaiya:surface');
@@ -157,8 +156,8 @@ test.describe('Snapshot providers in browser', () => {
     expect(report.gaiyaSurface).toBe(true);
     expect(report.yinhuiBiome).toBe('airless_moon');
     expect(report.hud).toBe('盖亚');
-    expect(report.yearNum).toBe(1247);
-    expect(report.year.replace(/[,\s]/g, '')).toMatch(/1247/);
+    expect(report.yearNum).toBe(1);
+    expect(report.year.replace(/[,\s]/g, '')).toMatch(/1/);
     expect(report.dock).toBeGreaterThanOrEqual(5);
     expect(report.empireKeys).toBe(12);
     expect(report.finite).toBe(true);

@@ -24,7 +24,7 @@ GE.app = (function () {
     layer: { labels: true, grid: true, regions: true, ownership: true, assets: true, orbit: true, coverage: true, atmo: true },
     initialized: Object.create(null),
     started: false,
-    deductionRound: GE.data.deduction.log[0].round,
+    deductionRound: (GE.data.deduction.log[0] && GE.data.deduction.log[0].round) || 0,
     simulatedYear: GE.data.world.年数
   };
 
@@ -33,8 +33,14 @@ GE.app = (function () {
     qualityPreset: 'high',
     autoRotate: true,
     cityLights: true,
+    autoDeduce: false,
+    autoDeduceIntervalSec: 30,
     reduced: window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   };
+
+  let autoDeduceTimer = null;
+  let autoDeduceBusy = false;
+  let autoDeduceAccum = 0;
 
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -96,6 +102,12 @@ GE.app = (function () {
     if (GE.surfaces) GE.surfaces.init();
     hydrateWorldStrip();
     renderCivDock();
+    restoreDeductionConsole();
+    syncFavoritesFromLeaders();
+    try {
+      const dockCount = document.getElementById('dock-count');
+      if (dockCount) dockCount.textContent = (GE.data.civs || []).length;
+    } catch (_) { /* ignore */ }
     bindShell();
     GE.notify.bind();
 
@@ -133,6 +145,7 @@ GE.app = (function () {
     const bootEl = document.getElementById('boot');
     bootEl.classList.add('done');
     state.started = true;
+    loadAutoDeduceSettings();
     pushInitialNotifications();
     cancelAnimationFrame(raf);
     last = performance.now();
@@ -228,15 +241,23 @@ GE.app = (function () {
 
   function renderCivDock() {
     const host = document.getElementById('civ-list');
-    host.innerHTML = GE.data.civs.map((c, i) => `
+    if (!host) return;
+    host.innerHTML = (GE.data.civs || []).map((c, i) => {
+      const leader = (c.leaders && c.leaders[0]) || null;
+      const leaderLine = leader
+        ? `${GE.esc(leader.title || '领袖')} · ${GE.esc(leader.name || '未名')}`
+        : '暂无领袖';
+      const progress = (c.科技树 && Number(c.科技树.下一阶段)) || 0;
+      return `
       <article class="civ-card" id="civ-card-${c.id}" data-civ="${c.id}" style="--civ:${c.color};animation-delay:${i * 0.06}s" tabindex="0" role="button" aria-label="查看${GE.esc(c.name)}">
         <div class="civ-swatch">${GE.icons.icon(c.id === 'bronze' ? 'gem' : c.id === 'abyss' ? 'water' : c.id === 'sylva' ? 'tree' : 'flag', 21)}</div>
         <div class="civ-info">
           <div class="civ-name-row"><span class="civ-name">${GE.esc(c.name)}</span><span class="civ-lv">CIV ${c.level}</span></div>
-          <div class="civ-leader">${GE.esc(c.leaders[0].title)} · ${GE.esc(c.leaders[0].name)}</div>
-          <div class="civ-bars"><span class="civ-lvbar"><i style="width:${c.科技树.下一阶段}%"></i></span><span class="civ-lvnum">${c.科技树.下一阶段}%</span></div>
+          <div class="civ-leader">${leaderLine}</div>
+          <div class="civ-bars"><span class="civ-lvbar"><i style="width:${progress}%"></i></span><span class="civ-lvnum">${progress}%</span></div>
         </div>
-      </article>`).join('');
+      </article>`;
+    }).join('');
 
     host.querySelectorAll('.civ-card').forEach(card => {
       const activate = () => {
@@ -250,6 +271,83 @@ GE.app = (function () {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
       });
     });
+    if (state.selectedCiv) {
+      host.querySelectorAll('.civ-card').forEach(c => c.classList.toggle('on', c.dataset.civ === state.selectedCiv));
+    }
+  }
+
+  function syncFavoritesFromLeaders() {
+    GE.data.favorites = Array.isArray(GE.data.favorites) ? GE.data.favorites : [];
+    const byId = new Map(GE.data.favorites.map(f => [f.id, f]));
+    (GE.data.civs || []).forEach(civ => {
+      const L = (civ.leaders || [])[0];
+      if (!L || !L.id) return;
+      const entry = {
+        id: L.id,
+        name: L.name,
+        civ: civ.id,
+        civId: civ.id,
+        种族与身份: `${L.race || '未知'} · ${civ.name}${L.title ? ' · ' + L.title : ''}`,
+        超凡能力: (L.abilities || []).slice(0, 2).map(a => `${a.name}${a.val != null ? ' ' + a.val : ''}`).join(' · ') || '未显化',
+        寿命与年龄: `${L.age != null ? L.age : '?'}岁 / 预期${L.lifespanMax != null ? L.lifespanMax : '?'}岁`,
+        性格与动机: L.motive || L.background || '尚在形成中',
+        近况: L.bodyState || L.agentStance || '近况未知',
+        age: L.age,
+        race: L.race,
+        title: L.title
+      };
+      if (byId.has(L.id)) Object.assign(byId.get(L.id), entry);
+      else {
+        GE.data.favorites.unshift(entry);
+        byId.set(L.id, entry);
+      }
+    });
+    // 去掉已不存在的旧领袖条目（保留手动收藏时也可用 id 匹配）
+    const live = new Set((GE.data.civs || []).flatMap(c => (c.leaders || []).map(l => l.id)));
+    GE.data.favorites = GE.data.favorites.filter(f => !f.civId || live.has(f.id) || !/^.*-g\d+$/.test(String(f.id || '')));
+  }
+
+  const DEDUCE_PERSIST_KEY = 'ge-deduction-console-v1';
+  function persistDeductionConsole() {
+    try {
+      const d = GE.data.deduction || {};
+      const payload = {
+        version: 1,
+        savedAt: Date.now(),
+        year: state.simulatedYear,
+        deductionRound: state.deductionRound,
+        log: Array.isArray(d.log) ? d.log.slice(0, 40) : [],
+        pendingDecisions: Array.isArray(d.pendingDecisions) ? d.pendingDecisions.slice(0, 40) : [],
+        lastMonologueReel: Array.isArray(d.lastMonologueReel) ? d.lastMonologueReel.slice(0, 20) : [],
+        lenses: Array.isArray(d.lenses) ? d.lenses : ['政治', '军事', '经济', '科技', '思潮', '个人']
+      };
+      localStorage.setItem(DEDUCE_PERSIST_KEY, JSON.stringify(payload));
+    } catch (err) {
+      console.warn('[创世引擎] persist deduction console', err);
+    }
+  }
+
+  function restoreDeductionConsole() {
+    try {
+      const raw = localStorage.getItem(DEDUCE_PERSIST_KEY);
+      if (!raw) return false;
+      const saved = JSON.parse(raw);
+      if (!saved || !Array.isArray(saved.log)) return false;
+      GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
+      // 仅当当前 log 为空（如创世重置后）才用本地缓存恢复，避免覆盖更新的服务端状态
+      if (!GE.data.deduction.log || !GE.data.deduction.log.length) {
+        GE.data.deduction.log = saved.log;
+        GE.data.deduction.pendingDecisions = saved.pendingDecisions || [];
+        GE.data.deduction.lastMonologueReel = saved.lastMonologueReel || [];
+        if (Array.isArray(saved.lenses) && saved.lenses.length) GE.data.deduction.lenses = saved.lenses;
+        if (Number.isFinite(Number(saved.deductionRound))) state.deductionRound = Number(saved.deductionRound);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.warn('[创世引擎] restore deduction console', err);
+      return false;
+    }
   }
 
   function pushInitialNotifications() {
@@ -358,6 +456,18 @@ GE.app = (function () {
     const dt = rawDt * simScale;
     elapsed += rawDt;
 
+    // 到时自动推演：按墙钟秒计，暂停时间时不触发
+    if (settings.autoDeduce && state.playing && state.started) {
+      autoDeduceAccum += rawDt;
+      const interval = Math.max(5, Number(settings.autoDeduceIntervalSec) || 30);
+      if (autoDeduceAccum >= interval && !autoDeduceBusy) {
+        autoDeduceAccum = 0;
+        triggerAutoDeduce();
+      }
+    } else {
+      autoDeduceAccum = 0;
+    }
+
     const v = GE.views[state.view];
     if (v && state.initialized[state.view]) {
       if (v.update) v.update(dt, rawDt, elapsed);
@@ -369,6 +479,44 @@ GE.app = (function () {
       if (v.render) v.render(renderer);
     }
     raf = requestAnimationFrame(frame);
+  }
+
+  async function triggerAutoDeduce() {
+    if (autoDeduceBusy || !settings.autoDeduce) return;
+    autoDeduceBusy = true;
+    try {
+      await runDeduction({ silent: true, auto: true });
+    } catch (err) {
+      console.warn('[创世引擎] auto deduce', err);
+    } finally {
+      autoDeduceBusy = false;
+    }
+  }
+
+  function setAutoDeduce(enabled, intervalSec) {
+    settings.autoDeduce = !!enabled;
+    if (intervalSec != null && Number.isFinite(Number(intervalSec))) {
+      settings.autoDeduceIntervalSec = Math.max(5, Math.min(600, Number(intervalSec)));
+    }
+    try {
+      localStorage.setItem('ge-auto-deduce', settings.autoDeduce ? '1' : '0');
+      localStorage.setItem('ge-auto-deduce-interval', String(settings.autoDeduceIntervalSec));
+    } catch (_) { /* ignore */ }
+    autoDeduceAccum = 0;
+    return {
+      enabled: settings.autoDeduce,
+      intervalSec: settings.autoDeduceIntervalSec
+    };
+  }
+
+  function loadAutoDeduceSettings() {
+    try {
+      const on = localStorage.getItem('ge-auto-deduce');
+      if (on === '1') settings.autoDeduce = true;
+      if (on === '0') settings.autoDeduce = false;
+      const sec = Number(localStorage.getItem('ge-auto-deduce-interval'));
+      if (Number.isFinite(sec) && sec >= 5) settings.autoDeduceIntervalSec = Math.min(600, sec);
+    } catch (_) { /* ignore */ }
   }
 
   /* ============ 外壳事件 ============ */
@@ -620,29 +768,63 @@ GE.app = (function () {
   }
 
   function applyWorldDelta(delta) {
-    if (!delta) return;
+    if (!delta) return { added: 0, updated: 0, removed: 0, shouldRefresh: false };
     GE.data.spaceBodies = GE.data.spaceBodies || [];
     const byId = new Map(GE.data.spaceBodies.map(b => [b.id, b]));
+    let added = 0;
+    let updated = 0;
+    let removed = 0;
     (delta.newBodies || []).forEach(b => {
       if (!byId.has(b.id)) {
         GE.data.spaceBodies.push(b);
         byId.set(b.id, b);
+        added += 1;
       }
     });
     (delta.updatedBodies || []).forEach(b => {
       const i = GE.data.spaceBodies.findIndex(x => x.id === b.id);
-      if (i >= 0) GE.data.spaceBodies[i] = b;
-      else GE.data.spaceBodies.push(b);
+      if (i >= 0) {
+        GE.data.spaceBodies[i] = b;
+        updated += 1;
+      } else {
+        GE.data.spaceBodies.push(b);
+        added += 1;
+      }
     });
     (delta.removedBodyIds || []).forEach(id => {
       const i = GE.data.spaceBodies.findIndex(x => x.id === id);
-      if (i >= 0) GE.data.spaceBodies.splice(i, 1);
+      if (i >= 0) {
+        GE.data.spaceBodies.splice(i, 1);
+        removed += 1;
+      }
     });
-    // 宇宙视图热更新
-    const uv = GE.views && GE.views.universe;
-    if (uv && state.initialized.universe && typeof uv.reloadBodies === 'function') {
-      try { uv.reloadBodies(); } catch (err) { console.warn('[创世引擎] universe reloadBodies', err); }
+    // 仅当文明成功探索到新天体 / 设施，或有实质更新时，才刷宇宙视图
+    const shouldRefresh = added > 0 || removed > 0 || updated > 0
+      || !!(delta.newGalaxies && delta.newGalaxies.length)
+      || !!(delta.newSystems && delta.newSystems.length);
+    if (shouldRefresh) {
+      const uv = GE.views && GE.views.universe;
+      if (uv && state.initialized.universe && typeof uv.reloadBodies === 'function') {
+        try { uv.reloadBodies(); } catch (err) { console.warn('[创世引擎] universe reloadBodies', err); }
+      }
     }
+    return { added, updated, removed, shouldRefresh };
+  }
+
+  function isPlainObject(v) {
+    return !!v && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  function deepMerge(target, patch) {
+    if (!isPlainObject(patch)) return target;
+    Object.keys(patch).forEach(k => {
+      const val = patch[k];
+      if (isPlainObject(val) && isPlainObject(target[k])) deepMerge(target[k], val);
+      else if (isPlainObject(val)) target[k] = deepMerge({}, val);
+      else if (Array.isArray(val)) target[k] = val.slice();
+      else if (val !== undefined) target[k] = val;
+    });
+    return target;
   }
 
   function applyDeduceResult(result, opts) {
@@ -668,6 +850,21 @@ GE.app = (function () {
     const yearEl = document.getElementById('ws-year-num');
     if (yearEl) yearEl.textContent = GE.fmt.num(state.simulatedYear);
 
+    const monologueReel = Array.isArray(result.monologueReel) && result.monologueReel.length
+      ? result.monologueReel
+      : (result.decisions || []).map(d => ({
+          characterId: d.characterId,
+          characterName: d.characterName,
+          civId: d.civId,
+          civName: d.civName,
+          role: d.role,
+          kind: d.kind,
+          monologue: d.monologue || '',
+          publicSpeech: d.publicSpeech || '',
+          decision: d.decision,
+          source: d.source || 'rules'
+        })).filter(x => x.monologue || x.decision);
+
     const log = {
       round: state.deductionRound,
       serverRound: serverRound != null ? serverRound : null,
@@ -678,9 +875,11 @@ GE.app = (function () {
         || '推演已收敛',
       lenses: result.lenses || {},
       decisions: result.decisions || [],
+      monologueReel,
       worldDelta: result.worldDelta || null,
       agentMode: (result.round && result.round.agentMode) || 'rules_only',
       agentMeta: result.agentMeta || null,
+      territory: null,
       // AI 调用日志（次数 + 返回内容）
       llmLogs: Array.isArray(result.llmLogs) ? result.llmLogs : [],
       llmTotals: result.llmTotals || null
@@ -704,9 +903,13 @@ GE.app = (function () {
         decision: d.decision,
         urgency: d.urgency,
         stance: d.stance,
-        kind: d.kind
+        kind: d.kind,
+        monologue: d.monologue || '',
+        publicSpeech: d.publicSpeech || '',
+        source: d.source || 'rules'
       }));
     }
+    GE.data.deduction.lastMonologueReel = monologueReel;
     if (result.chronicle && result.chronicle.length) {
       GE.data.chronicle = GE.data.chronicle || [];
       result.chronicle.forEach(entry => {
@@ -720,58 +923,350 @@ GE.app = (function () {
     applyWorldDelta(result.worldDelta);
 
     if (!opts.edict) {
+      try {
+        // 先合文明 spawn（分裂子邦），再执行领土意图
+        const civPatches = result.patchesSummary && result.patchesSummary.civs;
+        if (Array.isArray(civPatches)) {
+          civPatches.forEach(p => {
+            if (!p || !p.op) return;
+            if (p.op === 'spawn' && p.civ && p.civ.id) {
+              if (!(GE.data.civs || []).some(c => c.id === p.civ.id)) {
+                GE.data.civs.push(p.civ);
+              }
+            } else if (p.op === 'absorb' && p.civId) {
+              const idx = (GE.data.civs || []).findIndex(c => c.id === p.civId);
+              if (idx >= 0) GE.data.civs.splice(idx, 1);
+            } else if (p.op === 'stats' && p.civId && p.delta) {
+              const civ = (GE.data.civs || []).find(c => c.id === p.civId);
+              if (civ) {
+                civ.stats = civ.stats || {};
+                Object.keys(p.delta).forEach(k => {
+                  civ.stats[k] = Math.max(0, (Number(civ.stats[k]) || 0) + (Number(p.delta[k]) || 0));
+                });
+              }
+            }
+          });
+        }
+
+        let territoryEvents = result.patchesSummary && result.patchesSummary.territory;
+        if ((!Array.isArray(territoryEvents) || !territoryEvents.length) && GE.territory && GE.territory.deriveEventsFromTurn) {
+          territoryEvents = GE.territory.deriveEventsFromTurn({
+            decisions: result.decisions || []
+          });
+        }
+        if (GE.territory && Array.isArray(territoryEvents) && territoryEvents.length) {
+          const report = GE.territory.applyEvents(territoryEvents, { decisions: result.decisions || [] });
+          log.territory = report;
+          if (report && report.changedTiles > 0) {
+            log.summary = (log.summary || '') + ` · 疆域变动 ${report.changedTiles} 格`;
+            try {
+              if (GE.toast && GE.toast.show) {
+                GE.toast.show({
+                  type: 'info',
+                  icon: 'hex',
+                  title: '疆域变动',
+                  msg: `本轮易主 ${report.changedTiles} 格` +
+                    (report.expand ? ` · 扩张 ${report.expand}` : '') +
+                    (report.annex ? ` · 吞并 ${report.annex}` : '') +
+                    (report.split ? ` · 分裂 ${report.split}` : '')
+                });
+              }
+            } catch (_) { /* ignore */ }
+          }
+        }
+      } catch (err) {
+        console.warn('[创世引擎] territory apply', err);
+      }
+
       if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
       else if (GE.worldState && GE.worldState.advanceTurn) GE.worldState.advanceTurn();
-      // 服务端已改 civ 科技；若响应未带回 civs，前端用 patches 轻量回写
+      // 服务端 patches：科技 / 关系 / 立场
       try {
         const techPatches = result.patchesSummary && result.patchesSummary.tech;
         if (Array.isArray(techPatches)) {
           techPatches.forEach(p => {
             const civ = (GE.data.civs || []).find(c => c.id === p.civId);
-            if (!civ || !civ.科技树 || !civ.科技树.节点 || !civ.科技树.节点[p.node]) return;
-            civ.科技树.节点[p.node].进度 = p.progress;
+            if (!civ || !civ.科技树) return;
+            if (p.node && civ.科技树.节点 && civ.科技树.节点[p.node]) {
+              civ.科技树.节点[p.node].进度 = p.progress;
+            }
+          });
+        }
+        const relPatches = result.patchesSummary && result.patchesSummary.relations;
+        if (Array.isArray(relPatches)) {
+          GE.data.relations = Array.isArray(GE.data.relations) ? GE.data.relations : [];
+          relPatches.forEach(p => {
+            if (!p || !p.a || !p.b) return;
+            let rel = GE.data.relations.find(r =>
+              (r.a === p.a && r.b === p.b) || (r.a === p.b && r.b === p.a)
+            );
+            if (!rel) {
+              rel = { a: p.a, b: p.b, state: p.state || '警惕观望', reason: p.note || p.reason || '' };
+              GE.data.relations.push(rel);
+            }
+            if (p.state) rel.state = p.state;
+            if (p.note) rel.reason = ((rel.reason || '') + ' · ' + p.note).slice(0, 240);
+            else if (p.reason) rel.reason = String(p.reason).slice(0, 240);
+            ['trust', 'tension', 'lastDiplomaticAction', 'treaties', 'grievances'].forEach(k => {
+              if (p[k] !== undefined) rel[k] = Array.isArray(p[k]) ? p[k].slice() : (isPlainObject(p[k]) ? deepMerge({}, p[k]) : p[k]);
+            });
+          });
+        }
+        const charPatches = result.patchesSummary && result.patchesSummary.characters;
+        if (Array.isArray(charPatches)) {
+          charPatches.forEach(p => {
+            const civ = (GE.data.civs || []).find(c => c.id === p.civId || (c.leaders || []).some(l => l.id === p.characterId));
+            if (!civ) return;
+            if (p.replaceLeader && p.leader) {
+              civ.leaders = [p.leader];
+              return;
+            }
+            const L = (civ.leaders || []).find(l => l.id === p.characterId);
+            if (!L) return;
+            if (p.stance) L.agentStance = p.stance;
+            if (Number.isFinite(Number(p.age))) L.age = Number(p.age);
+            if (Number.isFinite(Number(p.lifespanMax))) L.lifespanMax = Number(p.lifespanMax);
+            if (p.bodyState) L.bodyState = String(p.bodyState);
+            if (p.isAgent === false) L.isAgent = false;
+            else if (p.isAgent === true) L.isAgent = true;
+            if (p.agentStatus) {
+              L.agent = Object.assign({}, L.agent || {}, {
+                status: p.agentStatus,
+                enabled: p.agentStatus !== 'deceased'
+              });
+            }
+            ['agentMemory', 'agentGoals', 'agentActions', 'agentConstraints', 'agentDiplomacy', 'succession'].forEach(k => {
+              if (p[k] !== undefined) {
+                if (isPlainObject(p[k])) L[k] = deepMerge(isPlainObject(L[k]) ? L[k] : {}, p[k]);
+                else if (Array.isArray(p[k])) L[k] = p[k].slice();
+                else L[k] = p[k];
+              }
+            });
           });
         }
       } catch (_) { /* ignore */ }
-      const dawn = GE.data.civs && GE.data.civs[0];
+      // 领袖可能继承/替换：刷新右侧文明列表与收藏夹
+      try {
+        syncFavoritesFromLeaders();
+        renderCivDock();
+        const dockCount = document.getElementById('dock-count');
+        if (dockCount) dockCount.textContent = (GE.data.civs || []).length;
+      } catch (err) {
+        console.warn('[创世引擎] refresh civ dock', err);
+      }
+      const dawn = GE.data.civs && GE.data.civs.find(c => c.id === 'dawn');
       if (dawn && dawn.科技树) {
         const cardBar = document.querySelector('#civ-card-dawn .civ-lvbar i');
         const cardNum = document.querySelector('#civ-card-dawn .civ-lvnum');
-        if (cardBar) cardBar.style.width = dawn.科技树.下一阶段 + '%';
-        if (cardNum) cardNum.textContent = dawn.科技树.下一阶段 + '%';
+        if (cardBar) cardBar.style.width = (dawn.科技树.下一阶段 || 0) + '%';
+        if (cardNum) cardNum.textContent = (dawn.科技树.下一阶段 || 0) + '%';
       }
     }
 
+    persistDeductionConsole();
     return log;
+  }
+
+  function localBodyStateForAge(age, lifespanMax) {
+    const max = Number(lifespanMax);
+    if (!Number.isFinite(max) || max <= 0) return '康健 · 年岁推进';
+    const ratio = age / max;
+    if (ratio >= 1) return '逝世 · 寿数已尽';
+    if (ratio >= 0.94) return '濒危 · 生命烛火将尽';
+    if (ratio >= 0.82) return '衰老 · 需族人照看';
+    if (ratio >= 0.62) return '渐老 · 经验沉淀';
+    if (ratio >= 0.35) return '康健 · 壮年';
+    return '康健 · 青年';
+  }
+
+  function advanceLocalCharacterAges(yearDelta) {
+    const patches = [];
+    const delta = Number(yearDelta) || 0;
+    if (delta <= 0) return patches;
+    (GE.data.civs || []).forEach(civ => {
+      (civ.leaders || []).forEach(ch => {
+        const age = Number(ch.age);
+        if (!Number.isFinite(age)) return;
+        const nextAge = Math.round((age + delta) * 10) / 10;
+        const lifespanMax = Number(ch.lifespanMax);
+        ch.age = nextAge;
+        ch.lastAgedYear = state.simulatedYear;
+        if (!Number.isFinite(ch.birthYear)) ch.birthYear = state.simulatedYear - nextAge;
+        if (Number.isFinite(lifespanMax) && lifespanMax > 0 && nextAge >= lifespanMax) {
+          ch.bodyState = `逝世 · 寿终于${state.simulatedYear}年`;
+          ch.isAgent = false;
+          ch.agent = Object.assign({}, ch.agent || {}, { enabled: false, status: 'deceased' });
+        } else {
+          ch.bodyState = localBodyStateForAge(nextAge, lifespanMax);
+        }
+        patches.push({ civId: civ.id, characterId: ch.id, age: ch.age, lifespanMax, bodyState: ch.bodyState });
+      });
+    });
+    return patches;
+  }
+
+  function advanceLocalAgentStates(yearDelta) {
+    const year = state.simulatedYear;
+    (GE.data.civs || []).forEach(civ => {
+      (civ.leaders || []).forEach(ch => {
+        ch.agentMemory = ch.agentMemory || { version: 1, episodic: [], semantic: {}, relationMemory: {}, legacy: [] };
+        ch.agentGoals = ch.agentGoals || { active: [], completed: [], abandoned: [] };
+        ch.agentActions = ch.agentActions || { lastAction: null, cooldowns: {}, history: [] };
+        ch.agentConstraints = ch.agentConstraints || { reserves: {}, deficits: [], blockedActions: [], riskTolerance: 0.5 };
+        ch.agentDiplomacy = ch.agentDiplomacy || { postureByCiv: {}, treaties: [], grievances: [] };
+        ch.succession = ch.succession || { rule: 'council', leaderId: ch.id, generation: 1, heirs: [], regency: null, history: [] };
+        const kind = optsEdictSafeKind(ch);
+        const mem = {
+          id: `mock-mem:${civ.id}:${ch.id}:${year}`,
+          year,
+          type: 'action',
+          subject: kind,
+          summary: `${ch.name}在 Mock 推演中继续推动${kind}`,
+          salience: 0.5
+        };
+        ch.agentMemory.episodic = (ch.agentMemory.episodic || []).concat([mem]).slice(-18);
+        if (!(ch.agentGoals.active || []).length) {
+          ch.agentGoals.active = [{
+            id: `mock-goal:${civ.id}:${kind}`,
+            type: kind === 'research' ? 'research' : kind === 'military' ? 'prepare_defense' : 'stability',
+            target: kind,
+            priority: 0.55,
+            progress: 0.1,
+            status: 'active',
+            createdYear: year,
+            reason: 'Mock 推演生成的短期目标'
+          }];
+        }
+        ch.agentActions.lastAction = {
+          id: `mock-act:${civ.id}:${year}`,
+          type: kind,
+          finalType: kind,
+          result: 'applied',
+          reason: 'Mock 规则路径落地',
+          year
+        };
+        ch.agentActions.history = (ch.agentActions.history || []).concat([ch.agentActions.lastAction]).slice(-12);
+        if (Number.isFinite(Number(ch.lifespanMax)) && Number(ch.age) >= Number(ch.lifespanMax)) {
+          const nextGen = (Number(ch.succession.generation) || 1) + 1;
+          const used = new Set();
+          (GE.data.civs || []).forEach(c => (c.leaders || []).forEach(l => { if (l && l.name) used.add(l.name); }));
+          const pools = {
+            human: { s: ['林', '苏', '江', '沈', '陆', '白', '顾', '叶', '夏', '裴', '周', '唐'], g: ['深', '砚', '寒', '衡', '澄', '岚', '川', '昭', '远', '辰', '启', '宁'] },
+            elf: { s: ['伊', '瑟', '翡', '洛', '薇', '茉', '月', '叶'], g: ['瑟兰', '茉语', '翡歌', '月汀', '森谣', '薇宁', '洛涟', '露衡'] },
+            dwarf: { s: ['巴', '杜', '戈', '石', '铁', '炉'], g: ['尔刚', '岩锤', '炉心', '铁脊', '铸铭', '石磊'] },
+            abyssal: { s: ['涅', '汐', '潮', '渊', '澪', '溟'], g: ['芮', '汐', '澪', '澜', '渊', '溟', '涟'] }
+          };
+          const race = String(ch.race || civ.社会形态 || '');
+          const poolKey = /精灵|林/.test(race) ? 'elf' : /矮人|锻|石/.test(race) ? 'dwarf' : /鲛|深渊|潮|海/.test(race) ? 'abyssal' : 'human';
+          const pool = pools[poolKey] || pools.human;
+          let name = pool.s[0] + pool.g[0];
+          for (let i = 0; i < 16; i++) {
+            const cand = pool.s[(year + nextGen + i) % pool.s.length] + pool.g[(year + nextGen * 3 + i) % pool.g.length];
+            if (!used.has(cand) && cand !== ch.name) { name = cand; break; }
+          }
+          const next = Object.assign({}, ch, {
+            id: `${ch.id}-g${nextGen}`,
+            name,
+            title: ch.title && !/领袖/.test(ch.title) ? ch.title : '继任领袖',
+            age: 28 + nextGen,
+            bodyState: '康健 · 新任领袖',
+            isAgent: true,
+            agent: { enabled: true, status: 'active' },
+            agentStance: ch.agentStance || '守成整合 / 观察局势',
+            motive: `继承${ch.name}的未竟事业。`,
+            agentMemory: { version: 1, episodic: [], semantic: {}, relationMemory: {}, legacy: [{ leaderId: ch.id, name: ch.name, summary: `${ch.name}于${year}年退场` }] },
+            agentGoals: { active: [{ id: `goal:${civ.id}:stability`, type: 'stability', target: civ.id, priority: 0.7, status: 'active', createdYear: year, reason: '继承期优先稳定' }], completed: [], abandoned: [] },
+            agentActions: { lastAction: null, cooldowns: {}, history: [] },
+            agentConstraints: { reserves: {}, deficits: [], blockedActions: [], riskTolerance: 0.5 },
+            agentDiplomacy: { postureByCiv: {}, treaties: [], grievances: [] },
+            succession: {
+              rule: ch.succession.rule || 'council',
+              leaderId: `${ch.id}-g${nextGen}`,
+              generation: nextGen,
+              heirs: [],
+              regency: null,
+              history: (ch.succession.history || []).concat([{ leaderId: ch.id, name: ch.name, endYear: year }]).slice(-12),
+              startedYear: year
+            }
+          });
+          civ.leaders = [next];
+        }
+      });
+    });
+  }
+
+  function optsEdictSafeKind(ch) {
+    if (/科研|学识/.test(JSON.stringify(ch.abilities || []))) return 'research';
+    if (/军|战略/.test(JSON.stringify(ch.abilities || []))) return 'military';
+    return 'policy';
   }
 
   function runMockDeduction(opts) {
     opts = opts || {};
+    const yearDelta = opts.edict ? 1 : 7;
     state.deductionRound += 1;
-    state.simulatedYear += opts.edict ? 1 : 7;
+    state.simulatedYear += yearDelta;
+    const characterAging = advanceLocalCharacterAges(yearDelta);
+    advanceLocalAgentStates(yearDelta);
     GE.data.world.年数 = state.simulatedYear;
     document.getElementById('ws-year-num').textContent = GE.fmt.num(state.simulatedYear);
     const result = opts.edict
       ? `神谕「${opts.edict}」开始生效（本地 Mock）。`
       : '（Mock）五文明决策完成交叉推演。';
+    const pending = (GE.data.civs || []).map(civ => {
+      const L = (civ.leaders || [])[0];
+      if (!L) return null;
+      const kind = optsEdictSafeKind(L);
+      return {
+        civ: civ.id,
+        civId: civ.id,
+        leader: L.name,
+        characterId: L.id,
+        decision: `${L.name}：Mock ${kind}`,
+        kind,
+        actionType: kind === 'military' ? 'annex_border' : kind === 'research' ? 'boost_research' : 'expand_frontier',
+        source: 'mock'
+      };
+    }).filter(Boolean);
+    GE.data.deduction = GE.data.deduction || { lenses: [], rounds: 0, pendingDecisions: [], log: [] };
+    GE.data.deduction.pendingDecisions = pending;
+
+    let territory = null;
+    if (!opts.edict && GE.territory) {
+      try {
+        const events = GE.territory.deriveEventsFromTurn({ decisions: pending });
+        territory = GE.territory.applyEvents(events, { decisions: pending });
+      } catch (err) {
+        console.warn('[创世引擎] mock territory', err);
+      }
+    }
+
     const log = {
       round: state.deductionRound,
       year: `${GE.data.world.纪元.纪年} · ${state.simulatedYear}年`,
-      summary: result,
+      summary: result + (territory && territory.changedTiles ? ` · 疆域变动 ${territory.changedTiles} 格` : ''),
       lenses: {
         政治: opts.edict ? '神谕重塑权力预期' : '陆轨对立继续升温',
         军事: opts.edict ? '各方进入最高戒备' : '轨道舰队提高戒备',
         经济: opts.edict ? '市场出现避险潮' : '航天预算继续扩张',
         科技: opts.edict ? '异常现象等待解析' : '受限点火获批',
         思潮: opts.edict ? '神迹引发信仰震荡' : '星空信仰加速分化',
-        个人: opts.edict ? '领袖动机被重新校准' : '苏砚与林深暂时和解'
-      }
+        个人: opts.edict ? '领袖动机被重新校准' : '关键角色随推演时间自然衰长'
+      },
+      characterAging,
+      territory,
+      decisions: pending
     };
     GE.data.deduction.log.unshift(log);
     if (!opts.edict) {
       if (GE.surfaces && GE.surfaces.advanceAllSurfaceTurns) GE.surfaces.advanceAllSurfaceTurns();
       else GE.worldState.advanceTurn();
     }
+    try {
+      syncFavoritesFromLeaders();
+      renderCivDock();
+    } catch (_) { /* ignore */ }
+    persistDeductionConsole();
     return log;
   }
 
@@ -821,32 +1316,52 @@ GE.app = (function () {
         if (log && result.agentMeta) log.agentMeta = result.agentMeta;
       } catch (err) {
         console.error('[创世引擎] 推演失败', err);
-        GE.toast.show({
-          type: 'warn',
-          icon: 'info',
-          title: '推演请求失败',
-          msg: String(err && err.message || err) + ' · 可加 ?mockDeduce=1 使用本地调试'
-        });
+        if (!opts.silent && !opts.auto) {
+          GE.toast.show({
+            type: 'warn',
+            icon: 'info',
+            title: '推演请求失败',
+            msg: String(err && err.message || err) + ' · 可加 ?mockDeduce=1 使用本地调试'
+          });
+        }
         return null;
       }
     }
 
-    GE.modal.close();
+    if (!opts.silent && !opts.auto) GE.modal.close();
+    // Agent 自述镜头：推演结果揭晓前播放（可跳过）
+    let skipMono = !!opts.skipMonologue || !!opts.silent || !!opts.auto;
+    let autoSkip = false;
+    try {
+      autoSkip = !!(navigator.webdriver)
+        || /(?:\?|&)(?:qa|mockDeduce)=/.test(location.search || '')
+        || localStorage.getItem('ge-skip-mono') === '1';
+    } catch (_) { /* ignore */ }
+    if (!skipMono && !autoSkip && log && Array.isArray(log.monologueReel) && log.monologueReel.length) {
+      try {
+        if (GE.panels && typeof GE.panels.playMonologueReel === 'function') {
+          await GE.panels.playMonologueReel(log.monologueReel, {
+            round: state.deductionRound,
+            year: state.simulatedYear
+          });
+        }
+      } catch (err) {
+        console.warn('[创世引擎] monologue reel', err);
+      }
+    }
     const msg = log && log.summary ? log.summary : '推演已收敛';
     let title = `第 ${state.deductionRound} 轮推演已收敛`;
     if (agentMeta && agentMeta.used && agentMeta.used !== 'rules_only') {
       title += ` · ${agentMeta.used}`;
       if (agentMeta.llmCalls) title += ` · AI×${agentMeta.llmCalls}`;
+      if (agentMeta.applied) title += ` · ${agentMeta.applied}人`;
     } else if (agentMeta && agentMeta.fallback) {
       title += ' · 规则回落';
     }
-    GE.toast.show({ type: 'success', icon: 'checkC', title, msg });
-    setTimeout(() => GE.toast.show({
-      type: 'warn',
-      icon: 'history',
-      title: '世界变量已改写',
-      msg: `世界推进至 ${state.simulatedYear} 年。新因果已载入大事记。`
-    }), 650);
+    if (opts.auto) title = '自动推演 · ' + title;
+    if (!opts.silent) {
+      GE.toast.show({ type: 'ok', icon: 'brain', title, msg });
+    }
     return log;
   }
 
@@ -878,6 +1393,18 @@ GE.app = (function () {
         if (v && v.setLayer) v.setLayer('assets', value);
       }
     }
+    if (key === 'autoDeduce') {
+      setAutoDeduce(!!value, settings.autoDeduceIntervalSec);
+      GE.toast.info('自动推演', value
+        ? `已开启 · 每隔 ${settings.autoDeduceIntervalSec} 秒（世界时间运行中）自动推进一轮`
+        : '已关闭');
+      return;
+    }
+    if (key === 'autoDeduceIntervalSec') {
+      setAutoDeduce(settings.autoDeduce, value);
+      GE.toast.info('自动推演间隔', `已设为 ${settings.autoDeduceIntervalSec} 秒`);
+      return;
+    }
     GE.toast.info('设置已更新', value ? '该表现选项已启用。' : '该表现选项已关闭。');
   }
 
@@ -896,6 +1423,7 @@ GE.app = (function () {
     runDeduction,
     setQuality,
     setSetting,
+    setAutoDeduce,
     settings,
     state,
     renderer

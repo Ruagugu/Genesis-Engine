@@ -7,16 +7,17 @@ window.GE = window.GE || {};
 
 GE.data = (function () {
 
-  /* ---------- 世界 ---------- */
+  /* ---------- 世界 ----------
+     开局种子 = 第1纪元·元年（创世刚落定，文明尚在篝火边） */
   const world = {
     状态: "运转中",
-    纪元: { 纪元: "曙光纪元", 纪年: "第4纪元", 核心特性: "超光速壁垒将破，万邦仰望星空" },
-    年数: 1247,
-    能级: 268,                 // 中魔（251~300）
-    能级档位: "中魔",
+    纪元: { 纪元: "奇迹纪元", 纪年: "第1纪元", 核心特性: "曦阳初燃，灵能潮汐第一次漫过大地，万族尚在蒙昧" },
+    年数: 1,
+    能级: 180,                 // 低魔（121~250）— 创世初灵能尚稀
+    能级档位: "低魔",
     空间形态: "单恒星系 · 多行星",
     核心法则: "质能守恒 · 灵能潮汐周期律",
-    物质与能量: "恒星『曦阳』为主序黄矮星，灵能随潮汐每六十年涨落一次",
+    物质与能量: "恒星『曦阳』刚入主序，灵能随潮汐微弱涨落，大地尚无工业火种",
     恒星名: "曦阳",
     母星名: "盖亚"
   };
@@ -798,6 +799,219 @@ GE.data = (function () {
       claimRadius: {}
     }
   };
+
+  /* ---------- 创世元年归零 ----------
+     运行时种子归零层：保留族群 / 角色原型与自然天体，清空文明成果。
+     - 文明等级、科技、国策持续年数、人口经济等回到 lv0
+     - 所有人工设施、建筑、仓库、疆域、地块开发清空
+     - 推演日志、关系、暗线、收藏夹只保留创世起点 */
+  const genesisProfiles = {
+    dawn: {
+      name: '晨曦部族', social: '游群', policy: '寻找长火',
+      policyText: '保存火种，沿温暖海岸寻找可长期停留的水源与洞穴。',
+      idea: '活过漫长黑夜，等太阳再次升起。',
+      military: '人口不足千，只有石矛、木弓与守夜号角。',
+      trait: '适应力 · 协作萌芽 · 仰望曦阳', plan: '学会稳定保存火种，形成第一个长期营地。',
+      origin: '曦阳初燃后，最早在东部暖流海岸醒来的逐光者族群，尚以采集、狩猎与口耳相传维系生存。',
+      politics: '无成文制度，由火堆旁的长者、猎手与观星者临时共议。', thought: '逐光本能——对太阳、潮汐与远方有朴素敬畏。',
+      leader: '林深 · 年轻的火堆守望者，沉静、克制、善于在迁徙前观察天象。', leaderTitle: '火堆守望者', leaderAge: 19,
+      stance: '保守迁徙 / 保存火种', stats: { 人口: 1, 军力: 4, 经济: 3, 稳定: 28, 科研: 2, 扩张: 8 }
+    },
+    aurel: {
+      name: '奥瑞利安游群', social: '游群', policy: '逐兽',
+      policyText: '追随兽群迁徙，争夺水源与石材。', idea: '谁守住水源，谁就能守住明日。',
+      military: '人口不足千，以猎队和石矛为全部武力。', trait: '猎场秩序 · 竞争本能 · 陆权萌芽', plan: '固定季节性营地，驯化第一批役兽。',
+      origin: '徘徊于中央金辉平原的逐兽者，凭力量、记忆与猎场秩序维持群体。', politics: '无国家，最强的猎手拥有临时号召力。', thought: '大地崇拜——认为脚下平原供养一切。',
+      leader: '萧玦 · 猎队首领，果断、多疑、习惯在资源不足时先占据高地。', leaderTitle: '猎队首领', leaderAge: 24,
+      stance: '争夺水源 / 领地本能', stats: { 人口: 1, 军力: 7, 经济: 3, 稳定: 22, 科研: 1, 扩张: 10 }
+    },
+    sylva: {
+      name: '希尔瓦娜林族', social: '林栖氏族', policy: '守林',
+      policyText: '避开猛兽与山火，寻找可越冬的树洞与清泉。', idea: '森林先活着，我们才活着。',
+      military: '人口数百，以木矛、藤索和草药为生存依靠。', trait: '自然亲和 · 长寿萌芽 · 守成', plan: '形成第一处林冠营地，记录可食植物。',
+      origin: '最早栖居于翠冠森林的长耳族群，在树冠、根脉与晨雾中学会倾听自然。', politics: '无固定政体，由年长者、采药者和梦语者共同决定迁徙方向。', thought: '万物有灵——每棵树与每条溪流都被视为亲族。',
+      leader: '伊瑟兰 · 林中梦语者，温和、缓慢、善于记住季节。', leaderTitle: '梦语者', leaderAge: 41,
+      stance: '避险守林 / 自然共生', stats: { 人口: 1, 军力: 3, 经济: 4, 稳定: 34, 科研: 3, 扩张: 4 }
+    },
+    bronze: {
+      name: '铜须石族', social: '穴居氏族', policy: '守洞',
+      policyText: '加固山洞入口，寻找燧石与可饮用的地下水。', idea: '山不会背弃记住它纹理的人。',
+      military: '人口数百，以石斧和洞穴壁垒自保。', trait: '耐力 · 石器直觉 · 守信', plan: '打磨更可靠的石器，守住第一处洞穴营地。',
+      origin: '龙脊山脉洞穴中的坚韧族群，尚未掌握冶金，只会挑选最硬的石头。', politics: '无国家，洞穴长者和最强壮的采石者拥有威望。', thought: '石魂崇拜——相信山石中有沉睡的声音。',
+      leader: '巴尔刚 · 年轻采石者，豪爽、固执、重承诺。', leaderTitle: '采石者', leaderAge: 38,
+      stance: '守洞采石 / 朴素交易', stats: { 人口: 1, 军力: 5, 经济: 4, 稳定: 30, 科研: 2, 扩张: 5 }
+    },
+    abyss: {
+      name: '深渊潮族', social: '潮汐氏族', policy: '随潮',
+      policyText: '跟随鱼群与暖流迁徙，避开深海裂缝中的未知阴影。', idea: '潮起时前行，潮落时沉默。',
+      military: '人口数百，以骨叉、歌声和鱼群警觉自保。', trait: '深潜本能 · 灵能微感 · 神秘封闭', plan: '记住第一条安全海沟路线。',
+      origin: '深海裂谷边缘的鲛人族群，依靠潮汐、鱼群与本能歌声生存。', politics: '无国家，由能记住潮汐路线的长者和领唱者带领。', thought: '潮水敬畏——深海既是母体，也是黑暗边界。',
+      leader: '涅芮 · 年轻领唱者，神秘、冷静、对深处声音格外敏感。', leaderTitle: '潮声领唱', leaderAge: 18,
+      stance: '避世随潮 / 深潜试探', stats: { 人口: 1, 军力: 4, 经济: 2, 稳定: 24, 科研: 2, 扩张: 5 }
+    }
+  };
+
+  function defaultAgentMemory(year) {
+    return { version: 1, episodic: [], semantic: {}, relationMemory: {}, legacy: [], updatedYear: year || 1 };
+  }
+
+  function defaultAgentGoals(year) {
+    return { active: [], completed: [], abandoned: [], updatedYear: year || 1 };
+  }
+
+  function defaultAgentActions(year) {
+    return { lastAction: null, cooldowns: {}, history: [], updatedYear: year || 1 };
+  }
+
+  function defaultAgentConstraints() {
+    return { reserves: {}, deficits: [], blockedActions: [], riskTolerance: 0.5 };
+  }
+
+  function defaultAgentDiplomacy(civId) {
+    const postureByCiv = {};
+    civs.forEach(other => {
+      if (other.id && other.id !== civId) postureByCiv[other.id] = 'neutral';
+    });
+    return { postureByCiv, treaties: [], grievances: [] };
+  }
+
+  function defaultSuccession(civ, leader) {
+    const social = String(civ.社会形态 || civ.stage || civ.name || '');
+    let rule = 'council';
+    if (/帝|王|皇/.test(social + civ.name)) rule = 'dynasty';
+    else if (/氏族|军/.test(social + civ.name)) rule = 'clan';
+    else if (/部落|潮|祭/.test(social + civ.name)) rule = 'theocracy';
+    else if (/联邦|联盟|议会/.test(social + civ.name)) rule = 'council';
+    return {
+      rule,
+      leaderId: leader.id,
+      generation: 1,
+      heirs: [],
+      regency: null,
+      history: [],
+      startedYear: 1
+    };
+  }
+
+  function resetLeaderAgentState(civ, leader) {
+    leader.agentMemory = defaultAgentMemory(1);
+    leader.agentGoals = defaultAgentGoals(1);
+    leader.agentActions = defaultAgentActions(1);
+    leader.agentConstraints = defaultAgentConstraints();
+    leader.agentDiplomacy = defaultAgentDiplomacy(civ.id);
+    leader.succession = defaultSuccession(civ, leader);
+  }
+
+  function applyGenesisReset() {
+    civs.forEach(civ => {
+      const p = genesisProfiles[civ.id];
+      if (!p) return;
+      civ.name = p.name;
+      civ.level = 0;
+      civ.stage = '原始';
+      civ.capital = '未定居';
+      civ.文明阶段 = '原始';
+      civ.社会形态 = p.social;
+      civ.起源 = p.origin;
+      civ.政体及运作 = p.politics;
+      civ.思潮 = p.thought;
+      civ.领袖及性格 = p.leader;
+      civ.目前国策 = { 名称: p.policy, 内容: p.policyText, 持续年数: 0 };
+      civ.国民理念 = p.idea;
+      civ.军事与人口 = p.military;
+      civ.文明特质 = p.trait;
+      civ.发展计划 = p.plan;
+      civ.科技树 = { 文明等级: 0, 下一阶段: 0, 节点: {} };
+      civ.stats = Object.assign({}, p.stats);
+      civ.orbital = { satellites: 0, station: null, ships: 0 };
+      if (Array.isArray(civ.leaders) && civ.leaders.length) {
+        const leader = civ.leaders[0];
+        leader.title = p.leaderTitle;
+        leader.role = '领袖';
+        leader.age = p.leaderAge;
+        leader.birthYear = 1 - p.leaderAge;
+        leader.lastAgedYear = 1;
+        leader.bodyState = '康健 · 创世初年';
+        leader.background = p.origin;
+        leader.motive = p.plan;
+        leader.isAgent = true;
+        leader.agent = Object.assign({}, leader.agent || {}, { enabled: true, status: 'active' });
+        leader.agentModel = 'GE-Agent · 创世种子 v1';
+        leader.agentStance = p.stance;
+        leader.abilities = (leader.abilities || []).map(a => Object.assign({}, a, {
+          val: Math.max(1, Math.min(40, Math.round((Number(a.val) || 10) * 0.35)))
+        }));
+        resetLeaderAgentState(civ, leader);
+        civ.leaders = [leader];
+      } else {
+        civ.leaders = [];
+      }
+    });
+
+    for (let i = spaceBodies.length - 1; i >= 0; i--) {
+      if (spaceBodies[i].flags && spaceBodies[i].flags.artificial) spaceBodies.splice(i, 1);
+    }
+    spaceBodies.forEach(body => {
+      body.flags = body.flags || {};
+      body.flags.surveyed = 'none';
+      if ('colonized' in body.flags) body.flags.colonized = false;
+      if (body.id === 'gaiya') body.desc = '文明尚未诞生的蔚蓝母星，山海、森林与潮汐刚刚稳定。';
+    });
+
+    favorites.length = 0;
+    // 创世收藏夹：默认注视各文明现任领袖，保证收藏夹可用
+    civs.forEach(civ => {
+      const L = (civ.leaders || [])[0];
+      if (!L) return;
+      favorites.push({
+        id: L.id,
+        name: L.name,
+        civ: civ.id,
+        civId: civ.id,
+        种族与身份: `${L.race || '未知'} · ${civ.name}${L.title ? ' · ' + L.title : ''}`,
+        超凡能力: (L.abilities || []).slice(0, 2).map(a => `${a.name}${a.val != null ? ' ' + a.val : ''}`).join(' · ') || '未显化',
+        寿命与年龄: `${L.age || '?'}岁 / 预期${L.lifespanMax || '?'}岁`,
+        性格与动机: L.motive || L.background || '尚在形成中',
+        近况: L.bodyState || '创世初年，命运未启',
+        age: L.age,
+        race: L.race,
+        title: L.title
+      });
+    });
+    chronicle.splice(0, chronicle.length, {
+      年份: '第1纪元 · 元年',
+      纪元: '奇迹纪元',
+      类型: '创世',
+      事件: '曦阳点燃，世界初成。文明尚在萌芽，历史从此起笔。',
+      事件概述: '曦阳点燃，世界初成。文明尚在萌芽，历史从此起笔。'
+    });
+    relations.length = 0;
+    legacies.length = 0;
+    eraCausal.承接 = '无。世界刚刚创建，历史尚未开始分叉。';
+    eraCausal.遗留 = '无。所有文明、建筑、疆域与星际设施均从空白起步。';
+    deduction.rounds = 0;
+    deduction.pendingDecisions = [];
+    deduction.log = [];
+    thresholds.forEach((t, index) => {
+      t.status = { dawn: index === 0 ? 'open' : 'locked', aurel: index === 0 ? 'open' : 'locked', sylva: index === 0 ? 'open' : 'locked', bronze: index === 0 ? 'open' : 'locked', abyss: index === 0 ? 'open' : 'locked' };
+    });
+    eras.splice(0, eras.length,
+      { name:'奇迹纪元', years:'进行中 · 已 1 年', desc:'创世元年，曦阳初燃，文明尚未真正诞生。', current:true },
+      { name:'皓月纪元', years:'未开启', desc:'尚未发生。' },
+      { name:'混沌纪元', years:'未开启', desc:'尚未发生。' },
+      { name:'曙光纪元', years:'未开启', desc:'尚未发生。' }
+    );
+
+    strategicMap.capitalSeeds = {};
+    strategicMap.claimRadius = {};
+    Object.values(bodySurfaces).forEach(surface => {
+      surface.capitalSeeds = {};
+      surface.claimRadius = {};
+      delete surface.warehouses;
+    });
+  }
+
+  applyGenesisReset();
 
   return { world, civLevels, energyScale, civs, races, transcendent, favorites,
            chronicle, thresholds, spaceBodies, relations, legacies, eraCausal, deduction, eras,

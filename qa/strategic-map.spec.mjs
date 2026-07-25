@@ -26,19 +26,12 @@ test('strategic grid topology and tile data are complete', async ({ page }) => {
   expect(report.regions).toBe(8);
 });
 
-test('tile details and warehouse are accessible', async ({ page }) => {
-  const owned = await page.evaluate(() => GE.worldState.tiles.find(t => t.ownerCivId && t.resources.length)?.id);
-  await page.evaluate(id => GE.app.showTileContext(id), owned);
+test('genesis tile details show undeveloped land and no warehouse', async ({ page }) => {
+  const sample = await page.evaluate(() => GE.worldState.tiles.find(t => !t.ownerCivId && t.resources.length)?.id);
+  await page.evaluate(id => GE.app.showTileContext(id), sample);
   await expect(page.locator('#ctx-panel')).toBeVisible();
-  await expect(page.locator('#ctx-inner')).toContainText(owned);
-  await expect(page.locator('#ctx-warehouse')).toBeVisible();
-  await page.click('#ctx-warehouse');
-  await expect(page.locator('.modal-title')).toContainText('国家仓储');
-  await expect(page.locator('.warehouse-row')).toHaveCount(12);
-  await expect(page.locator('.warehouse-scope')).toContainText('帝国总仓');
-  await expect(page.locator('.warehouse-scope')).toContainText('当前表面');
-  await expect(page.locator('.warehouse-breakdown').first()).toContainText('帝国');
-  await expect(page.locator('.warehouse-breakdown').first()).toContainText('盖亚');
+  await expect(page.locator('#ctx-inner')).toContainText(sample);
+  await expect(page.locator('#ctx-warehouse')).toHaveCount(0);
 });
 
 test('strategic layer controls are independent', async ({ page }) => {
@@ -48,29 +41,35 @@ test('strategic layer controls are independent', async ({ page }) => {
   await expect(page.locator('#lb-ownership')).toHaveClass(/on/);
 });
 
-test('merged warehouse marks a current surface without a warehouse', async ({ page }) => {
+test('genesis warehouse panel reports no established warehouse', async ({ page }) => {
   await page.evaluate(async () => {
     await GE.app.enterPlanet('yinhui', { silent: true });
     GE.panels.openWarehouse('dawn');
   });
-  await expect(page.locator('.warehouse-scope')).toContainText('帝国总仓');
-  await expect(page.locator('.warehouse-scope')).toContainText('银辉 · 未设仓');
-  await expect(page.locator('.warehouse-row')).toHaveCount(12);
+  await expect(page.locator('.modal-title')).toContainText('国家仓储');
+  await expect(page.locator('.panel')).toContainText('尚未在任何可登陆天体建立行星仓');
+  await expect(page.locator('.warehouse-row')).toHaveCount(0);
 });
 
-test('warehouse advances and remains bounded', async ({ page }) => {
+test('genesis surface advance has no warehouse side effects', async ({ page }) => {
   const result = await page.evaluate(() => {
     const before = GE.worldState.revision;
     GE.worldState.advanceTurn();
-    const w = GE.worldState.getWarehouse('dawn');
-    return { before, after:GE.worldState.revision, valid:Object.keys(w.stock).every(id => w.stock[id] >= 0 && w.stock[id] <= w.capacity[id]), hasFlow:Object.values(w.lastTurn.net).some(v => v !== 0) };
+    return {
+      before,
+      after: GE.worldState.revision,
+      warehouse: GE.worldState.getWarehouse('dawn'),
+      owned: GE.worldState.tiles.filter(t => t.ownerCivId).length,
+      buildings: GE.worldState.tiles.reduce((n, t) => n + t.buildings.length, 0)
+    };
   });
   expect(result.after).toBe(result.before + 1);
-  expect(result.valid).toBe(true);
-  expect(result.hasFlow).toBe(true);
+  expect(result.warehouse).toBeNull();
+  expect(result.owned).toBe(0);
+  expect(result.buildings).toBe(0);
 });
 
-test('merged warehouse uses empire totals without switching surfaces', async ({ page }) => {
+test('genesis empire warehouse totals are empty without switching surfaces', async ({ page }) => {
   const result = await page.evaluate(() => {
     const active = GE.surfaces.getActive();
     const moon = GE.surfaces.ensure('yinhui').state;
@@ -81,30 +80,31 @@ test('merged warehouse uses empire totals without switching surfaces', async ({ 
       moonWarehouse: moon.getWarehouse('dawn'),
       surfaceIds: empire.surfaces.map(s => s.surfaceId),
       resourceKeys: Object.keys(empire.stock),
-      finite: Object.values(empire.capacity).every(Number.isFinite) && Object.values(empire.stock).every(Number.isFinite)
+      finite: Object.values(empire.capacity).every(Number.isFinite) && Object.values(empire.stock).every(Number.isFinite),
+      empty: Object.values(empire.stock).every(v => v === 0) && Object.values(empire.capacity).every(v => v === 0)
     };
   });
 
   expect(result.activeBodyId).toBe('gaiya');
   expect(result.sameState).toBe(true);
   expect(result.moonWarehouse).toBeNull();
-  expect(result.surfaceIds).toEqual(['gaiya:surface']);
+  expect(result.surfaceIds).toEqual([]);
   expect(result.resourceKeys).toHaveLength(12);
   expect(result.finite).toBe(true);
+  expect(result.empty).toBe(true);
 });
 
-test('sparse warehouse state survives reload', async ({ page }) => {
+test('genesis surface revision survives reload without warehouses', async ({ page }) => {
   const before = await page.evaluate(() => {
     GE.worldState.advanceTurn();
-    const w = GE.worldState.getWarehouse('dawn');
-    return { revision: GE.worldState.revision, food: w.stock.food, key: GE.worldState.active.storageKey };
+    return { revision: GE.worldState.revision, warehouse: GE.worldState.getWarehouse('dawn'), key: GE.worldState.active.storageKey };
   });
   await page.reload();
   await page.waitForFunction(() => window.GE && GE.app && GE.app.state && GE.app.state.started, null, { timeout: 30000 });
-  const after = await page.evaluate(() => {
-    const w = GE.worldState.getWarehouse('dawn');
-    return { revision: GE.worldState.revision, food: w.stock.food };
-  });
+  const after = await page.evaluate(() => ({
+    revision: GE.worldState.revision,
+    warehouse: GE.worldState.getWarehouse('dawn')
+  }));
   expect(after.revision).toBe(before.revision);
-  expect(after.food).toBe(before.food);
+  expect(after.warehouse).toBeNull();
 });

@@ -36,9 +36,11 @@ function record(rec) {
     at: new Date().toISOString(),
     runId: rec.runId || null,
     round: rec.round != null ? rec.round : null,
-    purpose: rec.purpose || 'unknown', // character_enhance | detail_fill | test | other
+    purpose: rec.purpose || 'unknown', // character_decide | lens_critique | detail_fill | test | other
     model: rec.model || '',
     baseHost: rec.baseHost || '',
+    characterId: rec.characterId || null,
+    characterName: rec.characterName || null,
     ok: !!rec.ok,
     ms: Number(rec.ms) || 0,
     error: rec.error ? String(rec.error).slice(0, 400) : null,

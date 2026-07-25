@@ -14,7 +14,7 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
   'use strict';
   if (!surfaceDef) throw new Error('createWorldState: surfaceDef required');
   options = options || {};
-  const KEY = options.storageKey || ('genesis-engine-surface-' + (surfaceDef.id || 'default') + '-v2');
+  const KEY = options.storageKey || ('genesis-engine-surface-' + (surfaceDef.id || 'default') + '-v3');
   const map = () => surfaceDef;
   const gridApi = () => options.grid || GE.worldGrid;
 
@@ -305,7 +305,18 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
   }
   function serialize() {
     const tilePatches = {};
-    resolved.forEach(t => { if (t._changed) tilePatches[t.id] = { ownerCivId:t.ownerCivId, status:t.status, resources:t.resources, buildings:t.buildings }; });
+    resolved.forEach(t => {
+      if (t._changed) {
+        tilePatches[t.id] = {
+          ownerCivId: t.ownerCivId,
+          status: t.status,
+          resources: t.resources,
+          buildings: t.buildings,
+          claimTurn: t.claimTurn,
+          claimSource: t.claimSource
+        };
+      }
+    });
     return { revision, warehouses, tilePatches, surfaceId: surfaceDef.id };
   }
   function persist() { try { localStorage.setItem(KEY, JSON.stringify(serialize())); } catch (_) {} }
@@ -368,8 +379,64 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
   }
   function clearPersisted() { try { localStorage.removeItem(KEY); } catch (_) {} }
 
+  function setTileOwner(tileId, civId, meta) {
+    build();
+    const tile = resolved.get(tileId);
+    if (!tile) return null;
+    meta = meta || {};
+    const prev = tile.ownerCivId || null;
+    const next = civId || null;
+    if (prev === next) return { tile, prev, next, changed: false };
+    tile.ownerCivId = next;
+    tile.status = statusFor(tile.terrain, next);
+    tile.claimTurn = meta.claimTurn != null ? meta.claimTurn : (GE.data && GE.data.world && GE.data.world.年数) || revision;
+    tile.claimSource = meta.claimSource || (next ? 'expand' : 'release');
+    tile._changed = true;
+    if (next) ensureWarehouseFor(next, { skipPersist: true });
+    if (prev) pruneWarehouseIfEmpty(prev, { skipPersist: true });
+    if (!meta.skipRebuild) rebuildOutputs();
+    if (!meta.skipPersist) persist();
+    return { tile, prev, next, changed: true };
+  }
+
+  function ensureWarehouseFor(civId, opts) {
+    build();
+    opts = opts || {};
+    if (!civId) return null;
+    if (warehouses[civId]) {
+      const civ = GE.data.civs.find(c => c.id === civId);
+      if (civ) warehouses[civId] = normalizeWarehouse(civ, warehouses[civId]);
+      return warehouses[civId];
+    }
+    const civ = GE.data.civs.find(c => c.id === civId);
+    if (!civ) return null;
+    warehouses[civId] = normalizeWarehouse(civ, templateWarehouse(civ));
+    if (!opts.skipPersist) persist();
+    return warehouses[civId];
+  }
+
+  function pruneWarehouseIfEmpty(civId, opts) {
+    build();
+    opts = opts || {};
+    if (!civId || !warehouses[civId]) return false;
+    const owned = getTilesByCiv(civId).length;
+    const seeds = map().capitalSeeds || {};
+    if (owned > 0 || seeds[civId]) return false;
+    delete warehouses[civId];
+    if (!opts.skipPersist) persist();
+    return true;
+  }
+
+  function flushOwnership() {
+    build();
+    rebuildOutputs();
+    persist();
+    return revision;
+  }
+
   const api = {
     build, getTile, getRegion, getTilesByCiv, getTilesByRegion, getWarehouse, getCivSummary, advanceTurn, persist, clearPersisted,
+    setTileOwner, ensureWarehouseFor, pruneWarehouseIfEmpty, flushOwnership,
     get surfaceId() { return surfaceDef.id; },
     get bodyId() { return surfaceDef.bodyId; },
     get def() { return surfaceDef; },
@@ -412,6 +479,10 @@ GE.worldState = (function () {
     advanceTurn() { return requireActive().advanceTurn(); },
     persist() { return requireActive().persist(); },
     clearPersisted() { return requireActive().clearPersisted(); },
+    setTileOwner(tileId, civId, meta) { return requireActive().setTileOwner(tileId, civId, meta); },
+    ensureWarehouseFor(civId) { return requireActive().ensureWarehouseFor(civId); },
+    pruneWarehouseIfEmpty(civId) { return requireActive().pruneWarehouseIfEmpty(civId); },
+    flushOwnership() { return requireActive().flushOwnership(); },
     get tiles() { return requireActive().tiles; },
     get revision() { return requireActive().revision; },
     get resources() { return requireActive().resources; },

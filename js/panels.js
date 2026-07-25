@@ -36,6 +36,12 @@ GE.panels = (function () {
   function civById(id) { return D().civs.find(c => c.id === id); }
   function civColor(id) { const c = civById(id); return c ? c.color : '#888'; }
   function civLevelName(lv) { const l = D().civLevels.find(x => x.lv === lv); return l ? l.name : lv; }
+  function pctText(v) { return Math.round((Number(v) || 0) * 100) + '%'; }
+  function shortList(items, empty, render) {
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return `<div class="panel" style="font-size:12px;color:var(--tx-2)">${esc(empty)}</div>`;
+    return `<div class="stagger">${list.map(render).join('')}</div>`;
+  }
 
   /* ============================================================
      文明详情
@@ -271,6 +277,7 @@ GE.panels = (function () {
   function renderCivRealm(el, c) {
     const summary = GE.worldState.getCivSummary(c.id);
     const orbital = c.orbital;
+    const hasOrbitalAssets = !!(orbital && ((Number(orbital.satellites) || 0) > 0 || orbital.station || (Number(orbital.ships) || 0) > 0));
     const resCat = ((GE.worldState && GE.worldState.def) || GE.data.strategicMap).resourceCatalog;
     const regionNames = summary.regions.map(id => {
       const r = GE.worldState.getRegion(id);
@@ -278,6 +285,13 @@ GE.panels = (function () {
     }).join('、') || '无';
     const topOut = Object.entries(summary.output).sort((a,b)=>b[1]-a[1]).slice(0,3)
       .map(([id,v]) => ((resCat[id] && resCat[id].name) || id) + ' ' + v).join(' · ') || '无';
+    const terr = GE.territory && GE.territory.lastReport && GE.territory.lastReport();
+    const terrLine = terr && terr.changedTiles
+      ? `本轮疆域：易主 ${terr.changedTiles} 格` +
+        (terr.expand ? ` · 扩张 ${terr.expand}` : '') +
+        (terr.annex ? ` · 吞并 ${terr.annex}` : '') +
+        (terr.split ? ` · 分裂 ${terr.split}` : '')
+      : '本轮疆域：无变动（创世无主或未触发扩张/吞并）';
     el.innerHTML = `
       ${secHead('hex', '地表疆域', c.capital)}
       <div class="card-grid cols-3">
@@ -285,9 +299,9 @@ GE.panels = (function () {
         ${bigstat('≈' + GE.fmt.compact(summary.areaKm2), '疆域 · km²', 'globe', c.color)}
         ${bigstat(summary.buildings.length, '运行建筑', 'grid', c.color)}
       </div>
-      <div class="panel" style="margin-top:12px">${kv('覆盖地区', esc(regionNames))}${kv('主要产出', esc(topOut))}</div>
+      <div class="panel" style="margin-top:12px">${kv('覆盖地区', esc(regionNames))}${kv('主要产出', esc(topOut))}${kv('推演疆域', esc(terrLine))}</div>
       <div style="margin-top:12px"><button class="btn btn-gold" id="btn-open-warehouse">${ic('grid',14)}国家仓储</button><button class="btn" id="btn-focus-capital" style="margin-left:8px">${ic('target',14)}定位首都</button></div>
-      ${orbital ? secHead('satellite', '轨道资产', c.name) + `<div class="card-grid cols-3">${bigstat(orbital.satellites, '星链卫星', 'satellite', '#5fd6e6')}${bigstat(1, '轨道站', 'station', '#5fd6e6')}${bigstat(orbital.ships, '在轨舰船', 'ship', '#5fd6e6')}</div>` : ''}
+      ${hasOrbitalAssets ? secHead('satellite', '轨道资产', c.name) + `<div class="card-grid cols-3">${bigstat(orbital.satellites || 0, '轨道卫星', 'satellite', '#5fd6e6')}${bigstat(orbital.station ? 1 : 0, '轨道站', 'station', '#5fd6e6')}${bigstat(orbital.ships || 0, '在轨舰船', 'ship', '#5fd6e6')}</div>` : ''}
       <div class="panel" style="margin-top:14px;border-left:3px solid ${c.color}"><div style="font-size:11px;color:var(--tx-2);margin-bottom:4px">领土策略</div><p class="prose">${esc(c.发展计划)}</p></div>`;
     el.querySelector('#btn-open-warehouse').addEventListener('click', () => openWarehouse(c.id));
     el.querySelector('#btn-focus-capital').addEventListener('click', () => {
@@ -405,6 +419,17 @@ GE.panels = (function () {
             <div class="panel panel-hi" style="border-left:3px solid ${c.color}"><p class="prose lead">「${esc(L.motive)}」</p></div>`;
         } },
         ...(L.isAgent ? [{ id: 'agent', label: 'Agent', icon: 'chip', render: (el) => {
+          const mem = L.agentMemory || {};
+          const goals = L.agentGoals || {};
+          const actions = L.agentActions || {};
+          const constraints = L.agentConstraints || {};
+          const diplomacy = L.agentDiplomacy || {};
+          const succession = L.succession || {};
+          const activeGoals = Array.isArray(goals.active) ? goals.active : [];
+          const recentMem = Array.isArray(mem.episodic) ? mem.episodic.slice(-5).reverse() : [];
+          const blocked = Array.isArray(constraints.blockedActions) ? constraints.blockedActions.slice(-4).reverse() : [];
+          const postures = diplomacy.postureByCiv || {};
+          const postureRows = Object.keys(postures).map(id => ({ id, posture: postures[id] }));
           el.innerHTML = `
             <div class="panel panel-hi" style="display:flex;gap:14px;align-items:center;margin-bottom:16px">
               <span style="width:44px;height:44px;border-radius:12px;display:grid;place-items:center;background:rgba(139,124,246,.14);color:var(--violet)">${ic('chip', 22)}</span>
@@ -420,8 +445,27 @@ GE.panels = (function () {
               <div class="panel"><div style="font-size:11px;color:var(--tx-2);margin-bottom:6px">行为倾向</div>
                 <p class="prose" style="font-size:12px">依据五维性格 <strong>${esc(L.personality.code)}</strong> 与动机「${esc(L.motive)}」进行多角度推演，在每一轮世界演化中独立作出决策。</p></div>
             </div>
+            ${secHead('target', '当前目标', activeGoals.length + ' 项')}
+            ${shortList(activeGoals, '暂无长期目标；下一轮推演会根据行动与世界变化生成。', g => `<div class="panel" style="margin-bottom:8px;border-left:3px solid ${c.color}">
+              ${kv('目标', esc(g.type || 'goal') + (g.target ? ' · ' + esc(g.target) : ''))}
+              ${kv('优先级', '<span class="mono">' + pctText(g.priority) + '</span>')}
+              ${kv('原因', esc(g.reason || '由领袖动机与近期记忆生成'))}
+            </div>`)}
+            ${secHead('book', '近期记忆', recentMem.length + ' 条')}
+            ${shortList(recentMem, '暂无可回忆事件。', m => `<div class="panel" style="margin-bottom:8px">
+              ${kv(esc(m.type || '记忆'), esc(m.summary || ''))}
+              ${kv('显著度', '<span class="mono">' + pctText(m.salience) + '</span>')}
+            </div>`)}
+            ${secHead('bolt', '上回合行动')}
+            <div class="panel">${actions.lastAction ? `${kv('行动', esc(actions.lastAction.finalType || actions.lastAction.type || '—'))}${kv('结果', esc(actions.lastAction.result || '—'))}${kv('原因', esc(actions.lastAction.reason || '—'))}` : '<span class="tx2">暂无行动记录</span>'}</div>
+            ${secHead('warn', '资源 / 行动约束', blocked.length + ' 条')}
+            ${shortList(blocked, '暂无受阻行动。', b => `<div class="panel" style="margin-bottom:8px">${kv(esc(b.actionType || '行动'), esc(b.reason || '受约束'))}${kv('年份', '<span class="mono">' + esc(b.year || '—') + '</span>')}</div>`)}
+            ${secHead('network', '外交姿态')}
+            ${shortList(postureRows, '暂无外交姿态记录。', r => `<div class="rel-chip" style="margin-bottom:8px"><i style="width:9px;height:9px;border-radius:99px;background:${civColor(r.id)}"></i><span>${esc((civById(r.id) || {}).name || r.id)}</span><span style="flex:1"></span>${badge(r.posture, r.posture === 'hostile' ? 'red' : r.posture === 'friendly' ? 'green' : 'violet')}</div>`)}
+            ${secHead('crown', '继承状态')}
+            <div class="panel">${kv('制度', esc(succession.rule || '未定'))}${kv('代际', '<span class="mono">第 ' + esc(succession.generation || 1) + ' 代</span>')}${kv('继承人', '<span class="mono">' + esc((succession.heirs || []).length) + '</span> 名')}${kv('历代记录', '<span class="mono">' + esc((succession.history || []).length) + '</span> 条')}</div>
             ${secHead('brain', '推演说明')}
-            <div class="panel"><p class="prose">Agent 提交的决策将进入推演引擎，由大模型从 <strong>政治 / 军事 / 经济 / 科技 / 思潮 / 个人</strong> 六个角度并行推演对未来的影响，经多轮收敛后改写世界状态，并载入大事记。</p>
+            <div class="panel"><p class="prose">Agent 提交的决策会结合记忆、目标、行动约束、外交关系与继承状态进入推演引擎，经 WorldBuilder、六棱镜与 Resolver 写回世界状态，并载入大事记。</p>
             <div style="margin-top:12px"><button class="btn btn-cyan" id="btn-goto-deduce">${ic('brain', 14)}打开推演控制台</button></div></div>`;
           el.querySelector('#btn-goto-deduce').addEventListener('click', () => openDeduction());
         } }] : [])
@@ -514,16 +558,22 @@ GE.panels = (function () {
      ============================================================ */
   function openChronicle() {
     const eraColor = { 奇迹纪元: '#d8b76a', 皓月纪元: '#8fd0e8', 混沌纪元: '#e56b6b', 曙光纪元: '#5fd6e6' };
+    const list = Array.isArray(D().chronicle) ? D().chronicle : [];
     GE.modal.open({
       id: 'chronicle', title: '大事记', subtitle: '自创世累积 · 不可篡改的世界史',
       icon: 'history', accent: '#d8b76a', size: 'xl',
-      body: `<div class="timeline stagger">${D().chronicle.map(e => {
-        const col = eraColor[e.纪元] || '#d8b76a';
-        return `<div class="tl-item" style="--tl-c:${col}">
-          <div class="tl-year">${esc(e.年份)}<span class="badge tl-era-chip" style="border-color:${col}44;color:${col}">${esc(e.纪元)}</span></div>
-          <div class="tl-text">${esc(e.事件概述)}</div>
-        </div>`;
-      }).join('')}</div>`
+      body: list.length
+        ? `<div class="timeline stagger">${list.map(e => {
+            const col = eraColor[e.纪元] || '#d8b76a';
+            const text = e.事件概述 || e.事件 || e.summary || '（无记述）';
+            const people = Array.isArray(e.人物) && e.人物.length ? `<div class="tx2" style="margin-top:4px;font-size:11px">人物 · ${esc(e.人物.join('、'))}</div>` : '';
+            return `<div class="tl-item" style="--tl-c:${col}">
+              <div class="tl-year">${esc(e.年份 || '—')}<span class="badge tl-era-chip" style="border-color:${col}44;color:${col}">${esc(e.纪元 || '纪元')}</span></div>
+              <div class="tl-text">${esc(text)}</div>
+              ${people}
+            </div>`;
+          }).join('')}</div>`
+        : `<div class="panel"><p class="prose">世界刚刚创建，尚无大事记写入。推进推演后，编年会在此累积。</p></div>`
     });
   }
 
@@ -531,27 +581,35 @@ GE.panels = (function () {
      收藏夹
      ============================================================ */
   function openFavorites() {
+    const list = Array.isArray(D().favorites) ? D().favorites : [];
     GE.modal.open({
       id: 'favorites', title: '收藏夹', subtitle: '被注视的个体 · 持续追踪',
       icon: 'star', accent: '#d8b76a', size: 'xl',
-      body: `<div class="card-grid cols-1 stagger">${D().favorites.map(f => {
-        const col = civColor(f.civ);
-        return `<div class="panel" style="display:flex;gap:14px;align-items:flex-start;border-left:3px solid ${col}">
-          ${sigil(f.name[0], col, 54)}
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
-              <span style="font-size:15px;font-weight:900;font-family:var(--f-serif)">${esc(f.name)}</span>
-              <span style="font-size:11px;color:${col}">${esc(f.种族与身份)}</span>
-            </div>
-            <div class="card-grid cols-2" style="margin-top:10px">
-              ${kv('超凡能力', esc(f.超凡能力))}
-              ${kv('寿命与年龄', esc(f.寿命与年龄))}
-            </div>
-            <div style="margin-top:8px">${kv('性格与动机', esc(f.性格与动机))}</div>
-            <div class="panel" style="margin-top:10px;background:rgba(0,0,0,.2);font-size:12px;color:var(--tx-1);border-left:2px solid ${col}">
-              <span class="tx2">近况 · </span>${esc(f.近况)}</div>
-          </div></div>`;
-      }).join('')}</div>`
+      body: list.length
+        ? `<div class="card-grid cols-1 stagger">${list.map(f => {
+            const col = civColor(f.civ || f.civId);
+            const identity = f.种族与身份 || f.identity || ((f.race || '') + (f.title ? ' · ' + f.title : '')) || '—';
+            const power = f.超凡能力 || f.power || '—';
+            const life = f.寿命与年龄 || f.life || (f.age != null ? `${f.age} 岁` : '—');
+            const motive = f.性格与动机 || f.motive || f.background || '—';
+            const recent = f.近况 || f.recent || f.status || '尚无近况记录';
+            return `<div class="panel" style="display:flex;gap:14px;align-items:flex-start;border-left:3px solid ${col}">
+              ${sigil((f.name || '?')[0], col, 54)}
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+                  <span style="font-size:15px;font-weight:900;font-family:var(--f-serif)">${esc(f.name || '未名')}</span>
+                  <span style="font-size:11px;color:${col}">${esc(identity)}</span>
+                </div>
+                <div class="card-grid cols-2" style="margin-top:10px">
+                  ${kv('超凡能力', esc(power))}
+                  ${kv('寿命与年龄', esc(life))}
+                </div>
+                <div style="margin-top:8px">${kv('性格与动机', esc(motive))}</div>
+                <div class="panel" style="margin-top:10px;background:rgba(0,0,0,.2);font-size:12px;color:var(--tx-1);border-left:2px solid ${col}">
+                  <span class="tx2">近况 · </span>${esc(recent)}</div>
+              </div></div>`;
+          }).join('')}</div>`
+        : `<div class="panel"><p class="prose">收藏夹为空。创世状态下会自动关注各文明现任领袖；你也可在后续版本把任意关键人物加入注视。</p></div>`
     });
   }
 
@@ -679,6 +737,7 @@ GE.panels = (function () {
             const a = civById(r.a), b = civById(r.b);
             const an = a ? a.name : '诸国', bn = b ? b.name : '诸国';
             const col = relColor[r.state] || '#8fd0e8';
+            const action = r.lastDiplomaticAction;
             return `<div class="rel-chip" style="margin-bottom:9px">
               <i style="width:9px;height:9px;border-radius:99px;background:${a ? a.color : '#888'}"></i>
               <span style="font-weight:700;color:var(--tx-0)">${esc(an)}</span>
@@ -686,8 +745,9 @@ GE.panels = (function () {
               <i style="width:9px;height:9px;border-radius:99px;background:${b ? b.color : '#888'}"></i>
               <span style="font-weight:700;color:var(--tx-0)">${esc(bn)}</span>
               <span class="rel-state" style="background:${col}22;color:${col};border:1px solid ${col}44">${esc(r.state)}</span>
+              ${r.trust != null ? badge('信任 ' + r.trust, 'green') : ''}${r.tension != null ? badge('紧张 ' + r.tension, 'red') : ''}
               <span style="flex:1"></span></div>
-              <div style="font-size:11.5px;color:var(--tx-2);margin:-4px 0 9px 26px">${esc(r.reason)}</div>`;
+              <div style="font-size:11.5px;color:var(--tx-2);margin:-4px 0 9px 26px">${esc(r.reason)}${action ? `<br><span style="color:var(--tx-1)">${esc(action.summary || '')}</span>` : ''}</div>`;
           }).join('')}</div>`;
         } },
         { id: 'legacy', label: '遗留问题', icon: 'warn', render: (el) => {
@@ -765,6 +825,16 @@ GE.panels = (function () {
         ${toggleRow('cityLights', '城市夜光', s.cityLights)}
         ${toggleRow('reduced', '减弱动效', s.reduced)}
 
+        ${secHead('brain', '自动推演')}
+        ${toggleRow('autoDeduce', '到时自动推演', !!s.autoDeduce)}
+        <div class="panel" style="display:flex;flex-direction:column;gap:8px;margin:6px 0 16px">
+          <label class="kv"><span class="k">间隔（秒）</span>
+            <input id="set-auto-deduce-sec" class="input mono" type="number" min="5" max="600" step="5" style="width:96px"
+              value="${Number(s.autoDeduceIntervalSec) || 30}" />
+          </label>
+          <div style="font-size:11px;color:var(--tx-2)">开启后，在世界时间<strong>未暂停</strong>时按墙钟间隔自动推进一轮推演。自动轮次跳过自述镜头。建议 ≥ 10 秒。</div>
+        </div>
+
         ${secHead('network', '世界 API（创世引擎后端）')}
         <div class="panel" style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
           <label class="kv"><span class="k">API 根地址</span>
@@ -784,8 +854,8 @@ GE.panels = (function () {
           <label class="kv"><span class="k">推演模式</span>
             <select id="set-agent-mode" class="input" style="flex:1">
               <option value="rules_only" ${llm.agentMode === 'rules_only' ? 'selected' : ''}>rules_only · 仅规则（默认）</option>
-              <option value="hybrid" ${llm.agentMode === 'hybrid' ? 'selected' : ''}>hybrid · 规则 + LLM 补全</option>
-              <option value="full" ${llm.agentMode === 'full' ? 'selected' : ''}>full · 全量 Agent（预留）</option>
+              <option value="hybrid" ${llm.agentMode === 'hybrid' ? 'selected' : ''}>hybrid · 规则底稿 + 每人独立 LLM（≤8）</option>
+              <option value="full" ${llm.agentMode === 'full' ? 'selected' : ''}>full · 全员独立 LLM + 更深改写</option>
             </select>
           </label>
           <label class="kv"><span class="k">Base URL</span>
@@ -819,6 +889,14 @@ GE.panels = (function () {
         body.querySelectorAll('[data-toggle]').forEach(t => t.addEventListener('change', () => {
           GE.app.setSetting(t.dataset.toggle, t.checked);
         }));
+        const autoSec = body.querySelector('#set-auto-deduce-sec');
+        if (autoSec) {
+          autoSec.addEventListener('change', () => {
+            const v = Math.max(5, Math.min(600, Number(autoSec.value) || 30));
+            autoSec.value = v;
+            GE.app.setSetting('autoDeduceIntervalSec', v);
+          });
+        }
 
         const status = body.querySelector('#llm-status');
         function setStatus(msg, ok) {
@@ -998,9 +1076,18 @@ GE.panels = (function () {
   }
 
   function renderDeduction(root) {
-    const d = D().deduction;
+    const d = D().deduction || {};
+    d.lenses = Array.isArray(d.lenses) && d.lenses.length ? d.lenses : ['政治', '军事', '经济', '科技', '思潮', '个人'];
+    d.pendingDecisions = Array.isArray(d.pendingDecisions) ? d.pendingDecisions : [];
+    d.log = Array.isArray(d.log) ? d.log : [];
+    const world = D().world || {};
     const lensIcons = { 政治: 'balance', 军事: 'sword', 经济: 'coin', 科技: 'flask', 思潮: 'compass', 个人: 'user' };
-    const latest = d.log[0];
+    const latest = d.log[0] || {
+      round: 0,
+      year: `${(world.纪元 && world.纪元.纪年) || '第1纪元'} · ${world.年数 || 1}年`,
+      lenses: Object.fromEntries(d.lenses.map(l => [l, '尚未推演'])),
+      summary: '世界刚刚创建，文明尚处原始萌芽，尚无 Agent 决策写入历史。'
+    };
     const llmTotals = (GE.data && GE.data.llmTotals) || null;
     root.innerHTML = `
       <div class="deduce-grid">
@@ -1027,15 +1114,19 @@ GE.panels = (function () {
           ${secHead('chip', 'Agent 决策队列', d.pendingDecisions.length + ' 待命')}
           <div style="display:flex;flex-direction:column;gap:10px;max-height:420px;overflow-y:auto;padding-right:2px">
           ${d.pendingDecisions.map(p => {
-            const c = civById(p.civ);
+            const c = civById(p.civ) || { color: '#888', name: p.civ || '—' };
+            const src = p.source === 'llm' ? 'LLM' : '规则';
             return `<div class="agent-card" style="border-left:3px solid ${c.color}">
-              <div class="agent-ava" style="background:linear-gradient(140deg,${c.color},${c.color}88)">${esc(p.leader[0])}<span class="agent-live"></span></div>
+              <div class="agent-ava" style="background:linear-gradient(140deg,${c.color},${c.color}88)">${esc((p.leader || '?')[0])}<span class="agent-live"></span></div>
               <div class="agent-meta">
-                <div class="agent-name">${esc(p.leader)}<span style="font-weight:400;color:var(--tx-2);font-size:11px"> · ${esc(c.name)}</span></div>
-                <div class="agent-role">${badge(p.stance, p.urgency === '高' ? 'red' : p.urgency === '中' ? 'orange' : 'green')} <span class="tx3" style="font-size:10px">紧急度 · ${p.urgency}</span></div>
+                <div class="agent-name">${esc(p.leader)}<span style="font-weight:400;color:var(--tx-2);font-size:11px"> · ${esc(c.name)}</span>
+                  <span class="badge ${p.source === 'llm' ? 'badge-cyan' : ''}" style="font-size:9px;margin-left:6px">${src}</span>
+                </div>
+                <div class="agent-role">${badge(p.stance, p.urgency === '高' ? 'red' : p.urgency === '中' ? 'orange' : 'green')} <span class="tx3" style="font-size:10px">紧急度 · ${p.urgency || '—'}${p.kind ? ' · ' + esc(p.kind) : ''}</span></div>
+                ${p.monologue ? `<div class="agent-mono">「${esc(p.monologue)}」</div>` : ''}
                 <div class="agent-decision">${esc(p.decision)}</div>
               </div></div>`;
-          }).join('')}
+          }).join('') || `<div class="panel"><p class="prose">创世元年尚无待命决策。点击上方「推进一轮推演」后，各族群 Agent 会从原始状态提交第一批行动。</p></div>`}
           </div>
         </div>
 
@@ -1049,7 +1140,7 @@ GE.panels = (function () {
           </div>
           ${secHead('history', '推演日志', d.log.length + ' 轮')}
           <div id="deduce-log" style="display:flex;flex-direction:column;gap:10px;max-height:300px;overflow-y:auto;padding-right:2px">
-            ${d.log.map(logCard).join('')}
+            ${d.log.length ? d.log.map(logCard).join('') : `<div class="panel"><p class="prose">尚无推演日志。世界处于第 0 轮等待状态，第一次推进会写入创世后的首轮编年。</p></div>`}
           </div>
         </div>
       </div>`;
@@ -1058,7 +1149,7 @@ GE.panels = (function () {
     });
     root.querySelector('#btn-llm-logs')?.addEventListener('click', () => openLlmLogs());
     root.querySelector('#btn-deduce-info').addEventListener('click', () => {
-      GE.toast.show({ type: 'info', icon: 'brain', title: '推演机制', msg: '各文明 Agent 提交决策后，规则或 hybrid LLM 产出决策；六棱镜收敛世界变量，载入大事记。点「AI 调用日志」可查看每次模型调用次数与返回内容。' });
+      GE.toast.show({ type: 'info', icon: 'brain', title: '推演机制', msg: '人物决策 → 世界扩张/设施 → 六棱镜写回世界状态（扩张·变化·建筑·事件）→ 第三人称自传自述镜头 → 编年。hybrid 下每人独立 LLM。' });
     });
   }
 
@@ -1068,17 +1159,132 @@ GE.panels = (function () {
     const calls = meta.llmCalls != null ? meta.llmCalls : nLogs;
     const mode = l.agentMode || meta.used || 'rules_only';
     const fb = meta.fallback ? ` · 回落 ${meta.fallback}` : '';
+    const applied = meta.applied != null ? ` · ${meta.applied}人` : '';
+    const reel = Array.isArray(l.monologueReel) ? l.monologueReel : [];
     return `<div class="panel" style="border-left:3px solid var(--gold)">
       <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
         <span class="badge badge-gold mono">第 ${l.round} 轮</span>
         <span class="tx2 mono" style="font-size:11px">${esc(l.year)}</span>
-        <span class="badge ${calls ? 'badge-cyan' : ''}" style="font-size:10px">${esc(mode)} · AI×${calls}${fb}</span>
+        <span class="badge ${calls ? 'badge-cyan' : ''}" style="font-size:10px">${esc(mode)} · AI×${calls}${applied}${fb}</span>
       </div>
       <p class="prose" style="font-size:12.5px;margin-top:8px">${esc(l.summary)}</p>
+      ${reel.length ? `<details style="margin-top:8px"><summary class="mono" style="cursor:pointer;font-size:11.5px;color:var(--gold,#d8b76a)">角色自述（第三人称）· ${reel.length}</summary>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+          ${reel.map(m => {
+            const c = civById(m.civId) || { color: '#888', name: m.civName || '' };
+            return `<div class="panel" style="border-left:3px solid ${c.color};padding:8px 10px">
+              <div style="font-weight:700;color:var(--tx-0)">${esc(m.characterName)} <span class="tx2" style="font-weight:400;font-size:11px">· ${esc(c.name)}</span></div>
+              <div class="agent-mono" style="margin-top:4px">「${esc(m.monologue || '…')}」</div>
+              ${m.publicSpeech ? `<div class="tx2" style="font-size:11px;margin-top:4px">台词：${esc(m.publicSpeech)}</div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>
+      </details>` : ''}
       ${nLogs ? `<details style="margin-top:8px"><summary class="mono" style="cursor:pointer;font-size:11.5px;color:var(--cyan,#5fd6e6)">本轮 AI 返回 · ${nLogs} 条</summary>
         ${l.llmLogs.map(llmLogBlock).join('')}
       </details>` : (calls === 0 && mode !== 'rules_only' ? `<div class="mono" style="font-size:11px;color:var(--tx-2);margin-top:6px">本轮未实际调用模型（${esc(meta.fallback || meta.error || '—')}）</div>` : '')}
     </div>`;
+  }
+
+  /**
+   * 推演结果揭晓前的 Agent 自叙镜头卷
+   * @param {Array} reel
+   * @param {{ round?: number, year?: number }} meta
+   */
+  function playMonologueReel(reel, meta) {
+    return new Promise((resolve) => {
+      const items = (reel || []).filter(m => m && (m.monologue || m.decision));
+      if (!items.length) { resolve(); return; }
+      meta = meta || {};
+      // 最多播 8 条，避免过长
+      const queue = items.slice(0, 8);
+      let i = 0;
+      let closed = false;
+      let timer = null;
+      // 自动化 / 减动效：极速闪过
+      let fast = false;
+      try {
+        fast = !!(navigator.webdriver)
+          || document.documentElement.classList.contains('reduce-motion')
+          || localStorage.getItem('ge-skip-mono') === '1';
+      } catch (_) { /* ignore */ }
+
+      const host = document.createElement('div');
+      host.id = 'mono-reel-host';
+      host.className = 'mono-reel-host';
+      host.innerHTML = `
+        <div class="mono-reel-card" role="dialog" aria-live="polite">
+          <div class="mono-reel-top">
+            <span class="mono-reel-tag">角色自述 · 第三人称自传</span>
+            <span class="mono-reel-round mono">第 ${meta.round != null ? meta.round : '—'} 轮 · ${meta.year != null ? meta.year : '—'}年</span>
+            <button type="button" class="mono-reel-skip" id="mono-skip">跳过</button>
+          </div>
+          <div class="mono-reel-body">
+            <div class="mono-reel-ava" id="mono-ava">?</div>
+            <div class="mono-reel-meta">
+              <div class="mono-reel-name" id="mono-name">—</div>
+              <div class="mono-reel-role" id="mono-role">—</div>
+            </div>
+          </div>
+          <div class="mono-reel-text" id="mono-text"></div>
+          <div class="mono-reel-decision" id="mono-decision"></div>
+          <div class="mono-reel-progress"><i id="mono-bar"></i></div>
+          <div class="mono-reel-count mono" id="mono-count">1 / ${queue.length}</div>
+        </div>`;
+      document.body.appendChild(host);
+      requestAnimationFrame(() => host.classList.add('on'));
+
+      const elAva = host.querySelector('#mono-ava');
+      const elName = host.querySelector('#mono-name');
+      const elRole = host.querySelector('#mono-role');
+      const elText = host.querySelector('#mono-text');
+      const elDec = host.querySelector('#mono-decision');
+      const elBar = host.querySelector('#mono-bar');
+      const elCount = host.querySelector('#mono-count');
+
+      function finish() {
+        if (closed) return;
+        closed = true;
+        if (timer) clearTimeout(timer);
+        host.classList.remove('on');
+        host.classList.add('out');
+        setTimeout(() => { try { host.remove(); } catch (_) { /* */ } resolve(); }, fast ? 40 : 320);
+      }
+
+      function show(idx) {
+        if (closed) return;
+        if (idx >= queue.length) { finish(); return; }
+        i = idx;
+        const m = queue[i];
+        const c = civById(m.civId) || { color: '#5fd6e6', name: m.civName || '' };
+        const name = m.characterName || '—';
+        elAva.textContent = name[0] || '?';
+        elAva.style.background = `linear-gradient(140deg,${c.color},${c.color}88)`;
+        elName.textContent = name;
+        elRole.textContent = `${c.name || m.civName || ''}${m.role ? ' · ' + m.role : ''}${m.kind ? ' · ' + m.kind : ''}`;
+        elText.textContent = m.monologue || m.publicSpeech || '……';
+        elDec.textContent = m.decision || '';
+        elCount.textContent = `${i + 1} / ${queue.length}`;
+        elBar.style.transition = 'none';
+        elBar.style.width = '0%';
+        const len = String(m.monologue || m.decision || '').length;
+        const life = fast ? 80 : Math.max(2200, Math.min(4200, 1600 + len * 28));
+        requestAnimationFrame(() => {
+          elBar.style.transition = `width ${life}ms linear`;
+          elBar.style.width = '100%';
+        });
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => show(i + 1), life);
+      }
+
+      host.querySelector('#mono-skip')?.addEventListener('click', finish);
+      host.addEventListener('click', (ev) => {
+        if (ev.target && ev.target.id === 'mono-skip') return;
+        if (timer) clearTimeout(timer);
+        show(i + 1);
+      });
+      show(0);
+    });
   }
 
   function llmLogBlock(e) {
@@ -1155,34 +1361,54 @@ GE.panels = (function () {
   function runPipeline(root) {
     const stages = root.querySelectorAll('.pipe-stage');
     const btn = root.querySelector('#btn-run-deduce');
-    btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>推演中 …`;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span>Agent 决策中 …`;
     stages.forEach(s => s.classList.remove('on', 'run'));
     const lenses = root.querySelectorAll('.lens-cell');
     lenses.forEach(l => l.classList.remove('run'));
-    let i = 0;
-    const seq = [0, 1, 2, 3];
-    function nextStage() {
-      if (i > 0) { stages[seq[i - 1]].classList.remove('run'); stages[seq[i - 1]].classList.add('on'); }
-      if (i >= seq.length) { finish(root, btn); return; }
-      const st = stages[seq[i]];
-      st.classList.add('run');
-      if (seq[i] === 1) { // 透镜并发
-        lenses.forEach((l, k) => setTimeout(() => l.classList.add('run'), k * 130));
+
+    // 先等服务端真推演（含每人 LLM + 自叙）；揭晓前镜头卷在 runDeduction 内播放
+    (async () => {
+      try {
+        await GE.app.runDeduction();
+      } finally {
+        // 结果已揭晓：补流水线高亮动画
+        let i = 0;
+        const seq = [0, 1, 2, 3];
+        function nextStage() {
+          if (i > 0) {
+            stages[seq[i - 1]]?.classList.remove('run');
+            stages[seq[i - 1]]?.classList.add('on');
+          }
+          if (i >= seq.length) {
+            btn.disabled = false;
+            btn.innerHTML = `${ic('ff', 14)}推进一轮推演`;
+            const still = document.getElementById('deduce-root');
+            if (still) renderDeduction(still);
+            return;
+          }
+          const st = stages[seq[i]];
+          if (st) st.classList.add('run');
+          if (seq[i] === 1) {
+            lenses.forEach((l, k) => setTimeout(() => l.classList.add('run'), k * 100));
+          }
+          i++;
+          setTimeout(nextStage, seq[i - 1] === 1 ? 520 : 280);
+        }
+        nextStage();
       }
-      i++;
-      // 真推演在服务端；流水线动画略缩短
-      setTimeout(nextStage, seq[i - 1] === 1 ? 900 : 420);
-    }
-    nextStage();
+    })();
   }
 
   async function finish(root, btn) {
+    // 兼容旧调用；主路径已并入 runPipeline
     try {
-      await GE.app.runDeduction();   // 服务端真推演（rules_only / hybrid 由 llmConfig）
+      await GE.app.runDeduction();
     } finally {
-      btn.disabled = false;
-      btn.innerHTML = `${ic('ff', 14)}推进一轮推演`;
-      // 控制台仍开着时刷新展示
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = `${ic('ff', 14)}推进一轮推演`;
+      }
       const still = document.getElementById('deduce-root');
       if (still) renderDeduction(still);
     }
@@ -1191,6 +1417,7 @@ GE.panels = (function () {
   /* ============ 导出 ============ */
   return {
     openCiv, openLeader, openStation, openPlanetInfo, openChronicle,
-    openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openLlmLogs, openWarehouse, openRegion
+    openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openLlmLogs, openWarehouse, openRegion,
+    playMonologueReel
   };
 })();

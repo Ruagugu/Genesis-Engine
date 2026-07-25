@@ -225,9 +225,11 @@ GE.views.planet = (function () {
 
   function buildOrbitalsForBody(bodyId) {
     buildNearOrbitFacilities(bodyId);
-    // 星链壳：有 constellation 近轨设施或盖亚联邦叙事时显示
+    // 星链壳：仅在真实卫星数 / constellation 存在时显示；创世元年不再强制画默认轨道壳
     const hasConstellation = planetFacilities.some(f => f.cls === 'constellation');
-    if (bodyId === 'gaiya' || hasConstellation) {
+    const dawn = GE.data.civs && GE.data.civs.find(c => c.id === 'dawn');
+    const satelliteCount = Number(dawn && dawn.orbital && dawn.orbital.satellites) || 0;
+    if (hasConstellation || satelliteCount > 0) {
       buildSatelliteShell(bodyId);
     }
     // 舰船仅在「主站」存在时往返（兼容旧 HUD）
@@ -298,20 +300,8 @@ GE.views.planet = (function () {
       const phase = o.phase != null ? o.phase : (idx * 0.9);
       const speed = 0.12 / Math.pow(Math.max(alt / R, 1.1), 1.4);
 
-      // 淡色轨道线（同倾角圆）
-      const pts = [];
-      for (let i = 0; i <= 96; i++) {
-        pts.push(orbitPos(alt, inc, (i / 96) * Math.PI * 2, new THREE.Vector3()));
-      }
-      const orbitLine = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(pts),
-        new THREE.LineBasicMaterial({
-          color: fac.color || 0x5fd6e6,
-          transparent: true,
-          opacity: 0.18,
-          blending: THREE.AdditiveBlending
-        })
-      );
+      // 轨道线模拟暂时移除；仍保留 alt/inc/phase 供设施运动使用。
+      const orbitLine = null;
 
       const entry = {
         id: fac.id,
@@ -329,7 +319,7 @@ GE.views.planet = (function () {
         entry.update = GE.facilityMesh.makeUpdater({ mesh: group });
       }
       planetFacilities.push(entry);
-      view.scene.add(group, orbitLine);
+      view.scene.add(group);
 
       // 兼容旧逻辑：第一个模块站/空间站当作 station 主锚点
       if (!station && (cls === 'station_modular' || fac.type === '空间站' || fac.id === 'wangshu')) {
@@ -861,18 +851,8 @@ GE.views.planet = (function () {
     const ringMesh = new THREE.InstancedMesh(ringGeo, ringMat, sats.length);
     ringMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
-    // 轨道线
-    const orbitGroup = new THREE.Group();
-    shells.forEach(sh => {
-      const pts = [];
-      for (let i = 0; i <= 128; i++) {
-        const a = (i / 128) * Math.PI * 2;
-        pts.push(orbitPos(sh.alt * R, sh.inc, a, new THREE.Vector3()));
-      }
-      const g = new THREE.BufferGeometry().setFromPoints(pts);
-      const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x5fd6e6, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending }));
-      orbitGroup.add(l);
-    });
+    // 轨道线模拟暂时移除，避免星球表面出现多余圆线。
+    const orbitGroup = null;
 
     // 发光的壳（整层菲涅尔）
     const shellGlow = new THREE.Mesh(
@@ -886,7 +866,7 @@ GE.views.planet = (function () {
     );
 
     satShell = { sats, satMesh, ringMesh, orbitGroup, shellGlow };
-    view.scene.add(satMesh, ringMesh, orbitGroup, shellGlow);
+    view.scene.add(satMesh, ringMesh, shellGlow);
   }
 
   function orbitPos(alt, inc, a, out) {
@@ -1099,14 +1079,17 @@ GE.views.planet = (function () {
       case 'ownership': if (ownershipMesh) ownershipMesh.visible = on; if (politicalBorders) politicalBorders.visible = on; break;
       case 'assets': if (assetPoints) assetPoints.visible = on; break;
       case 'orbit':
-        if (satShell) { satShell.orbitGroup.visible = on; satShell.satMesh.visible = on; }
+        if (satShell) {
+          if (satShell.orbitGroup) satShell.orbitGroup.visible = on;
+          if (satShell.satMesh) satShell.satMesh.visible = on;
+        }
         planetFacilities.forEach(f => {
           if (f.group) f.group.visible = on;
           if (f.orbitLine) f.orbitLine.visible = on;
         });
         ships.forEach(s => { if (s.mesh) s.mesh.visible = on; });
         break;
-      case 'coverage': if (satShell) satShell.ringMesh.visible = on; break;
+      case 'coverage': if (satShell && satShell.ringMesh) satShell.ringMesh.visible = on; break;
       case 'atmo': {
         const body = activeBody();
         const vis = body ? resolveBodyVisual(body) : { hasAtmo: 1 };
@@ -1211,6 +1194,29 @@ GE.views.planet = (function () {
   view.focusCapital = function (civId) {
     const cap = (view._capitals || []).find(c => c.id === civId);
     if (cap) view.rig.flyTo({ radius: 220, target: cap.pos.clone() }, 1.4);
+  };
+  view.rebuildStrategicMap = function () {
+    if (!view._built || !currentBodyId) return false;
+    try {
+      const disposeLocal = (o) => {
+        if (!o) return;
+        view.scene.remove(o);
+        o.traverse && o.traverse(c => {
+          if (c.geometry && c.geometry.dispose) c.geometry.dispose();
+          if (c.material) {
+            if (Array.isArray(c.material)) c.material.forEach(m => m && m.dispose && m.dispose());
+            else if (c.material.dispose) c.material.dispose();
+          }
+        });
+      };
+      [terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints].forEach(disposeLocal);
+      terrainMesh = regionMesh = ownershipMesh = regionBorders = politicalBorders = assetPoints = null;
+      buildStrategicMap();
+      return true;
+    } catch (err) {
+      console.warn('[创世引擎] rebuildStrategicMap', err);
+      return false;
+    }
   };
   view.focusHome = function () { view.rig.flyTo({ radius: 300, target: new THREE.Vector3() }, 1.4); };
   view.dispose = function () {};

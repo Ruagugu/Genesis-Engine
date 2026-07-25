@@ -187,7 +187,7 @@ GE.surfaces = (function () {
     else if (body.surfaceSeed != null) topology.seed = body.surfaceSeed;
 
     const grid = GE.createWorldGrid(topology);
-    const storageKey = 'genesis-engine-surface-' + surfaceId.replace(/[:/]/g, '-') + '-v2';
+    const storageKey = 'genesis-engine-surface-' + surfaceId.replace(/[:/]/g, '-') + '-v3';
     const state = GE.createWorldState(Object.assign({}, def, { id: surfaceId, bodyId }), {
       storageKey,
       grid

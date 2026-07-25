@@ -38,7 +38,7 @@ test('universe body card can enter a non-home landable body', async ({ page }) =
   });
 
   await expect(page.locator('#ctx-enter-planet')).toBeVisible();
-  await expect(page.locator('#ctx-enter-planet')).toContainText('登陆表面');
+  await expect(page.locator('#ctx-enter-planet')).toContainText('登陆');
   await page.click('#ctx-enter-planet');
 
   await expect.poll(() => page.evaluate(() => ({
@@ -86,7 +86,7 @@ test('switching back to home restores its state facade', async ({ page }) => {
     changedState: true,
     changedKey: true,
     hud: '盖亚',
-    stationLabel: true
+    stationLabel: false
   });
 });
 
@@ -96,7 +96,7 @@ test('optional switch unload evicts aliases and rebuilds persisted state', async
     const sample = home.state.tiles[123];
     home.state.advanceTurn();
     const revision = home.state.revision;
-    const stock = home.state.getWarehouse('dawn').stock.food;
+    const warehouseBefore = home.state.getWarehouse('dawn');
 
     await GE.app.enterPlanet('yinhui', { silent: true, unloadPrevious: true });
     const evicted = !GE.surfaces.get('gaiya') && !GE.surfaces.get('gaiya:surface');
@@ -111,7 +111,8 @@ test('optional switch unload evicts aliases and rebuilds persisted state', async
       moonEvicted: !GE.surfaces.get('yinhui') && !GE.surfaces.get('yinhui:surface'),
       homeActive: GE.worldState.active === rebuilt.state && GE.worldGrid.active === rebuilt.grid,
       revision: rebuilt.state.revision,
-      stock: rebuilt.state.getWarehouse('dawn').stock.food,
+      warehouseBefore,
+      warehouseAfter: rebuilt.state.getWarehouse('dawn'),
       deterministic: sameSample.terrain === sample.terrain && sameSample.regionId === sample.regionId &&
         JSON.stringify(sameSample.resources) === JSON.stringify(sample.resources)
     };
@@ -125,10 +126,11 @@ test('optional switch unload evicts aliases and rebuilds persisted state', async
     deterministic: true
   }));
   expect(report.revision).toBe(1);
-  expect(report.stock).toBeGreaterThanOrEqual(0);
+  expect(report.warehouseBefore).toBeNull();
+  expect(report.warehouseAfter).toBeNull();
 });
 
-test('empire turn advances established surfaces only and preserves active facade', async ({ page }) => {
+test('empire turn skips empty genesis surfaces and preserves active facade', async ({ page }) => {
   const report = await page.evaluate(() => {
     const active = GE.surfaces.getActive();
     const before = active.state.revision;
@@ -136,6 +138,7 @@ test('empire turn advances established surfaces only and preserves active facade
     return {
       bodyId: GE.surfaces.activeBodyId,
       sameState: GE.worldState.active === active.state,
+      before,
       revisions,
       homeRevision: active.state.revision,
       moonWarehouse: GE.surfaces.ensure('yinhui').state.getWarehouse('dawn')
@@ -144,9 +147,73 @@ test('empire turn advances established surfaces only and preserves active facade
 
   expect(report.bodyId).toBe('gaiya');
   expect(report.sameState).toBe(true);
-  expect(report.revisions).toEqual([{ bodyId: 'gaiya', surfaceId: 'gaiya:surface', revision: 1 }]);
-  expect(report.homeRevision).toBe(1);
+  expect(report.revisions).toEqual([]);
+  expect(report.homeRevision).toBe(report.before);
   expect(report.moonWarehouse).toBeNull();
+});
+
+test('genesis clears extra key characters and default orbit guide lines', async ({ page }) => {
+  const report = await page.evaluate(() => {
+    const civs = GE.data.civs.map(civ => ({
+      id: civ.id,
+      leaderCount: (civ.leaders || []).length,
+      roles: (civ.leaders || []).map(l => l.role || ''),
+      ages: (civ.leaders || []).map(l => l.age),
+      bodyStates: (civ.leaders || []).map(l => l.bodyState || ''),
+      activeAgents: (civ.leaders || []).filter(l => l.isAgent !== false && (!l.agent || l.agent.enabled !== false)).length,
+      agentSchemas: (civ.leaders || []).map(l => !!(l.agentMemory && l.agentGoals && l.agentActions && l.agentConstraints && l.agentDiplomacy && l.succession))
+    }));
+    let lineCount = 0;
+    GE.views.planet.scene.traverse(obj => {
+      if (obj.type === 'Line') lineCount++;
+    });
+    const dawn = GE.data.civs.find(c => c.id === 'dawn');
+    return {
+      civs,
+      allSingleLeader: civs.every(c => c.leaderCount === 1),
+      noKeyRoles: civs.every(c => c.roles.every(r => !/关键人物/.test(r))),
+      allActiveAgents: civs.every(c => c.activeAgents === 1),
+      allAgentSchemas: civs.every(c => c.agentSchemas.every(Boolean)),
+      satelliteCount: Number(dawn && dawn.orbital && dawn.orbital.satellites) || 0,
+      lineCount
+    };
+  });
+
+  expect(report.allSingleLeader).toBe(true);
+  expect(report.noKeyRoles).toBe(true);
+  expect(report.allActiveAgents).toBe(true);
+  expect(report.allAgentSchemas).toBe(true);
+  expect(report.satelliteCount).toBe(0);
+  expect(report.lineCount).toBe(0);
+  expect(report.civs.find(c => c.id === 'dawn').ages[0]).toBe(19);
+});
+
+test('planet view shows orbital facilities without drawing orbit line guides', async ({ page }) => {
+  const report = await page.evaluate(async () => {
+    GE.data.spaceBodies.push({
+      id: 'qa-orbit-fac',
+      name: '测试轨道节点',
+      type: '空间站',
+      parent: 'gaiya',
+      radius: 1,
+      color: '#5fd6e6',
+      orbit: { a: 22, inc: 18, phase: 0 },
+      flags: { artificial: true, landable: false },
+      visual: { class: 'station_modular' }
+    });
+    await GE.app.enterPlanet('yinhui', { silent: true });
+    await GE.app.enterPlanet('gaiya', { silent: true });
+    let lineCount = 0;
+    let facilityVisible = false;
+    GE.views.planet.scene.traverse(obj => {
+      if (obj.type === 'Line') lineCount++;
+      if (obj.name === 'facility:qa-orbit-fac') facilityVisible = true;
+    });
+    return { lineCount, facilityVisible };
+  });
+
+  expect(report.facilityVisible).toBe(true);
+  expect(report.lineCount).toBe(0);
 });
 
 test('tile biomes match body type (no earth terrain on moon/rock)', async ({ page }) => {
