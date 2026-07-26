@@ -10,9 +10,10 @@ test-results/
 qa/shots/
 .qa-data/
 
-# Runtime data / frontend-saved LLM credentials (never commit)
+# Runtime data / frontend-saved LLM credentials / local accounts (never commit)
 data/runs/
 data/llm-settings.json
+data/users.json
 
 # Local conversation exports
 对话记录*.md

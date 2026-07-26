@@ -741,14 +741,28 @@ GE.views.planet = (function () {
     terrainMesh.userData.faceTileIds = faceTileIds;
     view.scene.add(terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints);
 
+    // F1：capitalSeeds 被创世重置清空时，从实际归属地块派生首都锚点，
+    // 保证 focusCapital（文明卡片点击 / 面板按钮）始终可用。
     const seeds = activeSurfaceDef().capitalSeeds || {};
     view._capitals = GE.data.civs
-      .filter(c => seeds[c.id])
       .map(c => {
-        const seed = seeds[c.id];
-        const tile = GE.worldGrid.nearestLatLon(seed.lat, seed.lon);
-        return { id: c.id, name: c.capital, civName: c.name, color: c.color, tileId: tile.id, pos: new THREE.Vector3(...tile.center).multiplyScalar(R * 1.05) };
-      });
+        let center = null;
+        let tileId = null;
+        if (seeds[c.id]) {
+          const tile = GE.worldGrid.nearestLatLon(seeds[c.id].lat, seeds[c.id].lon);
+          if (tile) { center = tile.center; tileId = tile.id; }
+        }
+        if (!center) {
+          try {
+            const owned = GE.worldState.getTilesByCiv(c.id) || [];
+            const anchor = owned.find(t => t.claimSource === 'seed' || t.claimSource === 'landing') || owned[0];
+            if (anchor) { center = anchor.center; tileId = anchor.id; }
+          } catch (_) { /* surface 未激活时跳过 */ }
+        }
+        if (!center) return null;
+        return { id: c.id, name: c.capital, civName: c.name, color: c.color, tileId, pos: new THREE.Vector3(...center).multiplyScalar(R * 1.05) };
+      })
+      .filter(Boolean);
   }
 
   /* ============ 大气层 ============ */
@@ -1212,6 +1226,11 @@ GE.views.planet = (function () {
       [terrainMesh, regionMesh, ownershipMesh, regionBorders, politicalBorders, assetPoints].forEach(disposeLocal);
       terrainMesh = regionMesh = ownershipMesh = regionBorders = politicalBorders = assetPoints = null;
       buildStrategicMap();
+      // F9：重建后重放用户图层开关，避免关掉的层被悄悄打开
+      try {
+        const layer = GE.app && GE.app.state && GE.app.state.layer;
+        if (layer) Object.entries(layer).forEach(([k, on]) => view.setLayer(k, on));
+      } catch (_) { /* ignore */ }
       return true;
     } catch (err) {
       console.warn('[创世引擎] rebuildStrategicMap', err);

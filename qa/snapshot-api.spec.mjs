@@ -1,7 +1,7 @@
 import { test, expect } from 'playwright/test';
 
 test.describe('Phase B read-only snapshot API', () => {
-  test('health reports phase D with oracle write path', async ({ request }) => {
+  test('health reports current phase with oracle and genesis write paths', async ({ request }) => {
     const res = await request.get('/api/v1/health');
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
@@ -9,11 +9,14 @@ test.describe('Phase B read-only snapshot API', () => {
       ok: true,
       apiVersion: 'v1',
       schemaVersion: 1,
-      phase: 'D',
+      phase: 'E',
       writeOps: true,
-      dOracle: true
+      dOracle: true,
+      eGenesis: true
     }));
     expect(body.writeAllow).toContain('POST /api/v1/runs/:id/oracle');
+    expect(body.writeAllow).toContain('POST /api/v1/runs/:id/civs');
+    expect(body.writeAllow).toContain('POST /api/v1/auth/register');
   });
 
   test('snapshot contract has world, bodies, surfaces, catalogs', async ({ request }) => {

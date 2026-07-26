@@ -31,9 +31,17 @@ GE.territory = (function () {
     return terrain === 'ocean' || terrain === 'coast';
   }
 
+  function waterCiv(civId) {
+    if (civId === 'abyss') return true;
+    const civ = (GE.data.civs || []).find(c => c.id === civId);
+    if (!civ) return false;
+    const s = String((civ.leaders && civ.leaders[0] && civ.leaders[0].race) || '')
+      + String(civ.文明特质 || '') + String(civ.name || '');
+    return /鲛人|深渊|潮汐|潮族|海族|水栖/.test(s);
+  }
+
   function terrainAllowed(civId, terrain) {
-    if (civId === 'abyss') return isWater(terrain);
-    return !isWater(terrain);
+    return waterCiv(civId) ? isWater(terrain) : !isWater(terrain);
   }
 
   function tileScore(tile) {
@@ -139,33 +147,34 @@ GE.territory = (function () {
     meta = meta || {};
     const cap = Math.max(0, Math.min(Number(budget) || 0, CAPS.maxExpandPerCiv));
     if (!civId || cap <= 0) return { type: 'expand', civId, changed: 0, tiles: [], skipped: true, reason: 'no_budget' };
-    let summary = ownershipSummary();
+    const summary = ownershipSummary();
     // 创世全无主：先落一枚首都/营地种子，再扩张
+    let seededTile = null;
     if (!summary.byCiv[civId] || summary.byCiv[civId] <= 0) {
-      const seeded = seedFirstSettlement(civId);
-      if (!seeded) return { type: 'expand', civId, changed: 0, tiles: [], skipped: true, reason: 'no_land_for_seed' };
-      summary = ownershipSummary();
+      seededTile = seedFirstSettlement(civId);
+      if (!seededTile) return { type: 'expand', civId, changed: 0, tiles: [], skipped: true, reason: 'no_land_for_seed' };
     }
-    const candidates = frontierTiles(civId).slice(0, Math.max(0, cap - (summary.byCiv[civId] === 1 ? 0 : 0)));
-    // 若刚种子，仍尝试再扩 cap 格（含种子后的 frontier）
-    const want = Math.max(1, cap);
-    const pick = frontierTiles(civId).slice(0, want);
+    // 种子之外仍尝试扩 cap 格（含种子后的 frontier）
+    const pick = frontierTiles(civId).slice(0, Math.max(1, cap));
     if (!pick.length) {
-      // 至少已有种子格
-      const owned = GE.worldState.getTilesByCiv(civId);
+      // F3：只有本次真的落了种子才算 1 格变动；否则如实报 0
       return {
         type: 'expand',
         civId,
-        changed: owned.length ? 1 : 0,
-        tiles: owned.slice(0, 1).map(t => ({ id: t.id, prev: null, next: civId })),
-        skipped: false,
-        reason: meta.reason || 'first_settlement'
+        changed: seededTile ? 1 : 0,
+        tiles: seededTile ? [{ id: seededTile.id, prev: null, next: civId }] : [],
+        skipped: !seededTile,
+        reason: meta.reason || (seededTile ? 'first_settlement' : 'no_frontier')
       };
     }
     const r = reassignTiles(pick.map(t => t.id), civId, {
       claimSource: 'expand',
       claimTurn: yearNow()
     });
+    if (seededTile) {
+      r.changed += 1;
+      r.tiles.unshift({ id: seededTile.id, prev: null, next: civId });
+    }
     return Object.assign({ type: 'expand', civId, reason: meta.reason || 'frontier_expand', source: meta.source || 'rules' }, r);
   }
 
@@ -212,12 +221,13 @@ GE.territory = (function () {
     const seen = new Set([start.id]);
     while (q.length && picked.length < target) {
       const cur = q.shift();
-      if (!terrainAllowed(childCivId, cur.terrain) && childCivId !== parentCivId) {
-        // 子文明默认沿用母文明地形规则；abyss 特例仅对 abyss 生效
-      }
-      if (childCivId === 'abyss' ? isWater(cur.terrain) : !isWater(cur.terrain) || parentCivId === 'abyss') {
-        picked.push(cur);
-      }
+      // F5：子文明按水陆属性择格；水族子邦取水域，陆族子邦取陆地，
+      // 但水族母邦分出的陆上飞地允许沿用母邦既有格（避免切不出连通块）
+      const childWantsWater = waterCiv(childCivId);
+      const tileOk = childWantsWater
+        ? isWater(cur.terrain)
+        : (!isWater(cur.terrain) || waterCiv(parentCivId));
+      if (tileOk) picked.push(cur);
       (cur.neighbors || []).forEach(nid => {
         if (seen.has(nid)) return;
         const n = GE.worldState.getTile(nid);
@@ -287,10 +297,11 @@ GE.territory = (function () {
       else report.applied.push(result);
     });
     lastReport = report;
+    // F2：rebuildStrategicMap 内部已自捕获并返回 false；
+    // 旧 fallback 调用的 buildStrategicMap 是模块私有函数，从不存在于 view 上
     if (report.changedTiles > 0 && GE.views && GE.views.planet && typeof GE.views.planet.rebuildStrategicMap === 'function') {
-      try { GE.views.planet.rebuildStrategicMap(); } catch (_) {
-        try { if (typeof GE.views.planet.buildStrategicMap === 'function') GE.views.planet.buildStrategicMap(); } catch (__){ /* ignore */ }
-      }
+      const ok = GE.views.planet.rebuildStrategicMap();
+      if (!ok) console.warn('[territory] 战略层重建失败，界面染色可能滞后');
     }
     return report;
   }
@@ -397,6 +408,8 @@ GE.territory = (function () {
     frontierTiles,
     borderTiles,
     ownershipSummary,
+    terrainAllowed,
+    waterCiv,
     lastReport() { return lastReport; }
   };
 })();

@@ -13,7 +13,8 @@ export default defineConfig({
     env: {
       PORT: '8125',
       GE_RUNS_DIR: '.qa-data/runs',
-      GE_LLM_SETTINGS_PATH: '.qa-data/llm-settings.json'
+      GE_LLM_SETTINGS_PATH: '.qa-data/llm-settings.json',
+      GE_USERS_PATH: '.qa-data/users.json'
     },
     reuseExistingServer: false
   }

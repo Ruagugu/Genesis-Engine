@@ -24,6 +24,7 @@ GE.app = (function () {
     layer: { labels: true, grid: true, regions: true, ownership: true, assets: true, orbit: true, coverage: true, atmo: true },
     initialized: Object.create(null),
     started: false,
+    landingCivId: null,
     deductionRound: (GE.data.deduction.log[0] && GE.data.deduction.log[0].round) || 0,
     simulatedYear: GE.data.world.年数
   };
@@ -73,17 +74,8 @@ GE.app = (function () {
   let oracleEvents = null;
 
   function playerToken() {
-    try {
-      let t = localStorage.getItem('ge-player-token');
-      if (!t || t.length < 12) {
-        const bytes = new Uint8Array(16);
-        if (crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
-        else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-        t = 'ge_' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-        localStorage.setItem('ge-player-token', t);
-      }
-      return t;
-    } catch (_) { return null; }
+    // 阶段 E：统一走 GE.auth（账号 token 或稳定匿名 token）
+    return GE.auth ? GE.auth.ensureToken() : null;
   }
 
   function syncPlayFromServerClock(clock) {
@@ -646,6 +638,10 @@ GE.app = (function () {
     document.getElementById('tb-faster').addEventListener('click', () => changeSpeed(1));
     document.getElementById('tb-advance').addEventListener('click', () => GE.panels.openDeduction());
 
+    const accountBtn = document.getElementById('btn-account');
+    if (accountBtn) accountBtn.addEventListener('click', () => GE.panels.openAccount());
+    refreshAccountHud();
+
     document.getElementById('btn-edict').addEventListener('click', () => GE.panels.openEdict());
     document.getElementById('btn-deduce').addEventListener('click', () => GE.panels.openDeduction());
     document.getElementById('btn-settings').addEventListener('click', () => GE.panels.openSettings());
@@ -686,6 +682,13 @@ GE.app = (function () {
       else if (e.key.toLowerCase() === 'c') GE.panels.openChronicle();
       else if (e.key.toLowerCase() === 'a') GE.panels.openDeduction();
     });
+  }
+
+  function refreshAccountHud() {
+    const label = document.getElementById('account-label');
+    if (!label) return;
+    const name = GE.auth && GE.auth.username();
+    label.textContent = name || '登录';
   }
 
   function onResize() {
@@ -790,8 +793,132 @@ GE.app = (function () {
     });
   }
 
+  /* ============ 创世落地模式（阶段 E · 仅盖亚） ============ */
+  function landingBannerEl() {
+    let el = document.getElementById('landing-banner');
+    if (!el) {
+      el = GE.h('<div id="landing-banner" class="glass" style="position:fixed;top:74px;left:50%;transform:translateX(-50%);z-index:60;padding:10px 18px;display:flex;gap:12px;align-items:center;border:1px solid rgba(216,183,106,.45)"><span id="landing-banner-text" style="font-size:13px"></span><button class="mini-btn" id="landing-cancel">稍后再选</button></div>');
+      document.body.appendChild(el);
+      el.querySelector('#landing-cancel').addEventListener('click', () => cancelLandingMode());
+    }
+    return el;
+  }
+
+  async function startLandingMode(civId) {
+    const civ = (GE.data.civs || []).find(c => c.id === civId);
+    if (!civ) return;
+    state.landingCivId = civId;
+    await enterPlanet('gaiya', { silent: true });
+    const el = landingBannerEl();
+    el.querySelector('#landing-banner-text').innerHTML =
+      `${GE.icons.icon('globe', 14)} <b style="color:${civ.color}">${GE.esc(civ.name)}</b> · 选择你的落地之地 —— 点击一块无主的合法土地`;
+    el.hidden = false;
+    GE.toast.show({
+      type: 'info', icon: 'globe', title: '创世落地',
+      msg: '在盖亚上点选一块无主地块作为文明的第一处营地。'
+    });
+  }
+
+  function cancelLandingMode() {
+    state.landingCivId = null;
+    const el = document.getElementById('landing-banner');
+    if (el) el.hidden = true;
+  }
+
+  function landingLegal(civId, tile) {
+    if (!tile) return { ok: false, reason: '未知地块' };
+    if (tile.ownerCivId) return { ok: false, reason: '此地已有归属' };
+    const allowed = GE.territory && typeof GE.territory.terrainAllowed === 'function'
+      ? GE.territory.terrainAllowed(civId, tile.terrain)
+      : true;
+    if (!allowed) return { ok: false, reason: '地形不适宜此族群定居' };
+    return { ok: true };
+  }
+
+  async function confirmLanding(tileId) {
+    const civId = state.landingCivId;
+    const civ = (GE.data.civs || []).find(c => c.id === civId);
+    const tile = GE.worldState.getTile(tileId);
+    if (!civ || !tile) return;
+    const legal = landingLegal(civId, tile);
+    if (!legal.ok) { GE.toast.warn('无法在此落地', legal.reason); return; }
+    const center = tile.center;
+    // 单位向量 → 经纬（与 view.planet latLonToVec 逆向）
+    const lat = Math.asin(Math.max(-1, Math.min(1, center[1]))) * 180 / Math.PI;
+    const lon = Math.atan2(center[2], center[0]) * 180 / Math.PI;
+    try {
+      const res = await fetch(`${apiRoot()}/api/v1/runs/${encodeURIComponent(runId())}/civs/${encodeURIComponent(civId)}/settle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Player-Token': playerToken() || '' },
+        body: JSON.stringify({ surfaceId: 'gaiya:surface', tileId: tile.id, lat, lon }),
+        cache: 'no-store'
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        GE.toast.warn('落地失败', data.message || data.error || `HTTP ${res.status}`);
+        return;
+      }
+      // 客户端权威写地块：首块归属 + 首都种子 + 仓储
+      const def = GE.worldState.def;
+      if (def) {
+        def.capitalSeeds = def.capitalSeeds || {};
+        def.claimRadius = def.claimRadius || {};
+        def.capitalSeeds[civId] = { lat, lon };
+        def.claimRadius[civId] = 4;
+      }
+      GE.worldState.setTileOwner(tile.id, civId, { claimSource: 'landing' });
+      civ.territorySeed = { lat, lon, weight: 1 };
+      civ.capital = data.capital || civ.capital;
+      cancelLandingMode();
+      clearSelection();
+      if (GE.views.planet && GE.views.planet.rebuildStrategicMap) GE.views.planet.rebuildStrategicMap();
+      if (GE.views.planet && GE.views.planet.focusCapital) GE.views.planet.focusCapital(civId);
+      refreshCivChrome();
+      GE.toast.show({
+        type: 'ok', icon: 'flag', title: `${civ.name} · 落地成功`,
+        msg: `${data.capital || '初火营地'}的第一堆火已燃起。世界推演将从这里开始。`
+      });
+    } catch (err) {
+      GE.toast.warn('落地请求失败', String(err && err.message || err));
+    }
+  }
+
+  function showLandingConfirm(tile) {
+    const civ = (GE.data.civs || []).find(c => c.id === state.landingCivId);
+    if (!civ) { cancelLandingMode(); return; }
+    const map = GE.worldState.def || GE.data.strategicMap;
+    const terrain = (map.terrainCatalog || GE.data.terrainCatalog)[tile.terrain] || { name: tile.terrain };
+    const region = GE.worldState.getRegion(tile.regionId);
+    const legal = landingLegal(civ.id, tile);
+    ctxInner.innerHTML = `
+      <header class="ctx-head" style="--ctx-c:${civ.color}">
+        <button class="ctx-close" id="ctx-close-landing" aria-label="关闭详情">${GE.icons.icon('x', 14)}</button>
+        <div class="ctx-kicker">${GE.icons.icon('flag', 12)}创世落地 · ${GE.esc(civ.name)}</div>
+        <div class="ctx-title">${GE.esc(terrain.name)}</div>
+        <div class="ctx-sub">${tile.id} · ${region ? GE.esc(region.name) : '未知地区'}</div>
+      </header>
+      <div class="ctx-body">
+        <div class="panel">
+          <div class="kv"><span class="k">归属</span><span class="v">${tile.ownerCivId ? '已有归属' : '无主之地'}</span></div>
+          <div class="kv"><span class="k">资源</span><span class="v">${tile.resources.length ? tile.resources.length + ' 项' : '未探明'}</span></div>
+          <div class="kv"><span class="k">判定</span><span class="v" style="color:${legal.ok ? 'var(--cyan, #5fd6e6)' : 'var(--red, #e35d6a)'}">${legal.ok ? '适宜落地' : GE.esc(legal.reason)}</span></div>
+        </div>
+        <div class="panel" style="margin-top:8px;font-size:11.5px;color:var(--tx-2)">落地后不可迁移；文明将以此为原点向外扩张。</div>
+      </div>
+      <div class="ctx-actions">
+        ${legal.ok ? `<button class="btn btn-gold" id="ctx-landing-confirm">${GE.icons.icon('flag', 14)}确认落地</button>` : ''}
+        <button class="btn" id="ctx-landing-repick">重选地块</button>
+      </div>`;
+    ctxPanel.hidden = false;
+    ctxInner.querySelector('#ctx-close-landing').addEventListener('click', clearSelection);
+    ctxInner.querySelector('#ctx-landing-repick').addEventListener('click', clearSelection);
+    const ok = ctxInner.querySelector('#ctx-landing-confirm');
+    if (ok) ok.addEventListener('click', () => confirmLanding(tile.id));
+  }
+
   function showTileContext(tileId) {
     const tile = GE.worldState.getTile(tileId); if (!tile) return;
+    if (state.landingCivId) { showLandingConfirm(tile); return; }
     const map = GE.worldState.def || GE.data.strategicMap;
     const terrain = (map.terrainCatalog || GE.data.terrainCatalog)[tile.terrain] || { name: tile.terrain };
     const region = GE.worldState.getRegion(tile.regionId);
@@ -1061,6 +1188,19 @@ GE.app = (function () {
             if (p.op === 'spawn' && p.civ && p.civ.id) {
               if (!(GE.data.civs || []).some(c => c.id === p.civ.id)) {
                 GE.data.civs.push(p.civ);
+                // F8：带 territorySeed 的新文明补首都种子，focusCapital / 出生路径可用
+                try {
+                  const seed = p.civ.territorySeed;
+                  const def = GE.worldState.def;
+                  if (seed && def && Number.isFinite(Number(seed.lat))) {
+                    def.capitalSeeds = def.capitalSeeds || {};
+                    def.claimRadius = def.claimRadius || {};
+                    if (!def.capitalSeeds[p.civ.id]) {
+                      def.capitalSeeds[p.civ.id] = { lat: seed.lat, lon: seed.lon };
+                      def.claimRadius[p.civ.id] = 4;
+                    }
+                  }
+                } catch (_) { /* ignore */ }
               }
             } else if (p.op === 'absorb' && p.civId) {
               const idx = (GE.data.civs || []).findIndex(c => c.id === p.civId);
@@ -1593,6 +1733,10 @@ GE.app = (function () {
     setQuality,
     setSetting,
     setAutoDeduce,
+    startLandingMode,
+    cancelLandingMode,
+    refreshAccountHud,
+    refreshCivChrome,
     settings,
     state,
     renderer,

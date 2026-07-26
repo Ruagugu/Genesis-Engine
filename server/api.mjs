@@ -17,6 +17,8 @@ import * as seatService from './seat-service.mjs';
 import * as clockService from './clock-service.mjs';
 import * as oracleService from './oracle-service.mjs';
 import * as sseHub from './sse-hub.mjs';
+import * as authService from './auth-service.mjs';
+import * as genesisService from './genesis-service.mjs';
 
 const port = process.env.PORT ? Number(process.env.PORT) : 8123;
 const mime = {
@@ -216,18 +218,32 @@ async function handleApi(req, res, urlPath) {
       ok: true,
       apiVersion: 'v1',
       schemaVersion: 1,
-      phase: 'D',
+      phase: 'E',
       writeOps: true,
       c6: true,
       dOracle: true,
+      eGenesis: true,
       writeAllow: [
         'POST /api/v1/runs',
         'POST /api/v1/runs/:id/deduce',
+        'POST /api/v1/runs/:id/reset',
         'POST /api/v1/bodies/:id/surface/ensure',
+        'POST /api/v1/runs/:id/bodies/:bodyId/surface/ensure',
         'PUT /api/v1/llm-settings',
+        'POST /api/v1/llm-settings',
+        'DELETE /api/v1/llm-settings',
+        'DELETE /api/v1/llm-logs',
+        'POST /api/v1/auth/register',
+        'POST /api/v1/auth/login',
+        'DELETE /api/v1/auth/users',
+        'POST /api/v1/runs/:id/civs',
+        'POST /api/v1/runs/:id/civs/:civId/settle',
         'POST /api/v1/runs/:id/seats/claim',
+        'POST /api/v1/runs/:id/seats/spectate',
         'POST /api/v1/runs/:id/oracle',
-        'POST /api/v1/runs/:id/clock/pause'
+        'POST /api/v1/runs/:id/oracle/:eid/cancel',
+        'POST /api/v1/runs/:id/clock/pause',
+        'POST /api/v1/runs/:id/clock/advance'
       ],
       agentModes: ['rules_only', 'hybrid', 'full'],
       agentMode: llm.agentMode || run.agentMode || 'rules_only',
@@ -377,6 +393,37 @@ async function handleApi(req, res, urlPath) {
   }
 
   // ---------- runs list / create ----------
+  // ---------- Phase E: auth ----------
+  if (urlPath === '/api/v1/auth/register' && req.method === 'POST') {
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    const result = authService.register(body);
+    json(res, result.status || (result.ok ? 201 : 400), result);
+    return true;
+  }
+
+  if (urlPath === '/api/v1/auth/login' && req.method === 'POST') {
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    const result = authService.login(body);
+    json(res, result.status || (result.ok ? 200 : 401), result);
+    return true;
+  }
+
+  if (urlPath === '/api/v1/auth/me' && req.method === 'GET') {
+    const token = playerTokenFrom(req, null);
+    const user = authService.userByToken(token);
+    if (!user) { json(res, 404, { ok: false, error: 'not_registered' }); return true; }
+    json(res, 200, { ok: true, ...authService.publicUser(user) });
+    return true;
+  }
+
+  // QA / 调试：清空本地账号存储（与 DELETE /llm-settings 同权限模型：本地单机）
+  if (urlPath === '/api/v1/auth/users' && req.method === 'DELETE') {
+    json(res, 200, authService.resetStore());
+    return true;
+  }
+
   if (urlPath === '/api/v1/runs' && req.method === 'GET') {
     json(res, 200, { items: runStore.list() });
     return true;
@@ -508,6 +555,61 @@ async function handleApi(req, res, urlPath) {
     touchRun(run);
     sseHub.publish(run.id, 'seat.claimed', { seat: result.seat });
     json(res, result.created ? 201 : 200, result);
+    return true;
+  }
+
+  // ---------- Phase E: 创建文明 / 落地 ----------
+  const civCreateMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/civs$/);
+  if (civCreateMatch && req.method === 'POST') {
+    const id = decodeURIComponent(civCreateMatch[1]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, body);
+    const user = authService.userByToken(token);
+    if (!user) {
+      json(res, 401, { error: 'not_registered', message: '创建文明需要注册账号并登录' });
+      return true;
+    }
+    const result = genesisService.createCiv(run, user, body);
+    if (!result.ok) { json(res, result.status || 400, result); return true; }
+    touchRun(run);
+    sseHub.publish(run.id, 'civ.created', {
+      civId: result.civ.id, name: result.civ.name, by: user.username
+    });
+    sseHub.publish(run.id, 'seat.claimed', { seat: result.seat });
+    // LLM 补全异步跟进：成功则 revision++ 并广播，前端可拉快照刷新文案
+    genesisService.enrichCivWithLlm(run, result.civ)
+      .then(r => {
+        if (r && r.ok && r.applied) {
+          touchRun(run);
+          sseHub.publish(run.id, 'civ.enriched', { civId: result.civ.id, applied: r.applied });
+        }
+      })
+      .catch(err => console.warn('[genesis] enrich failed', err && err.message));
+    json(res, 201, result);
+    return true;
+  }
+
+  const civSettleMatch = urlPath.match(/^\/api\/v1\/runs\/([^/]+)\/civs\/([^/]+)\/settle$/);
+  if (civSettleMatch && req.method === 'POST') {
+    const id = decodeURIComponent(civSettleMatch[1]);
+    const civId = decodeURIComponent(civSettleMatch[2]);
+    const run = runStore.get(id);
+    if (!run) { json(res, 404, { error: 'not_found', resource: 'run', id }); return true; }
+    let body = {};
+    try { body = await readBody(req); } catch (e) { json(res, 400, { error: String(e.message || e) }); return true; }
+    ensureRunTicked(run);
+    const token = playerTokenFrom(req, body);
+    const user = authService.userByToken(token);
+    if (!user) { json(res, 401, { error: 'not_registered' }); return true; }
+    const result = genesisService.settleCiv(run, user, civId, body);
+    if (!result.ok) { json(res, result.status || 400, result); return true; }
+    touchRun(run);
+    sseHub.publish(run.id, 'civ.settled', { civId, capital: result.capital, tileId: result.tileId });
+    json(res, 200, result);
     return true;
   }
 

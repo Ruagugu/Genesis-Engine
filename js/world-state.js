@@ -436,7 +436,7 @@ GE.createWorldState = function createWorldState(surfaceDef, options) {
 
   const api = {
     build, getTile, getRegion, getTilesByCiv, getTilesByRegion, getWarehouse, getCivSummary, advanceTurn, persist, clearPersisted,
-    setTileOwner, ensureWarehouseFor, pruneWarehouseIfEmpty, flushOwnership,
+    setTileOwner, ensureWarehouseFor, pruneWarehouseIfEmpty, flushOwnership, tilesOwnedRatio,
     get surfaceId() { return surfaceDef.id; },
     get bodyId() { return surfaceDef.bodyId; },
     get def() { return surfaceDef; },
@@ -483,12 +483,15 @@ GE.worldState = (function () {
     ensureWarehouseFor(civId) { return requireActive().ensureWarehouseFor(civId); },
     pruneWarehouseIfEmpty(civId) { return requireActive().pruneWarehouseIfEmpty(civId); },
     flushOwnership() { return requireActive().flushOwnership(); },
+    tilesOwnedRatio(civId) { return requireActive().tilesOwnedRatio(civId); },
     get tiles() { return requireActive().tiles; },
     get revision() { return requireActive().revision; },
     get resources() { return requireActive().resources; },
     get regions() { return requireActive().regions; },
     get surfaceId() { return active ? active.surfaceId : null; },
     get bodyId() { return active ? active.bodyId : null; },
-    get def() { return active ? active.def : null; }
+    get def() { return active ? active.def : null; },
+    get storageKey() { return active ? active.storageKey : null; },
+    get warehouseCivIds() { return active ? active.warehouseCivIds : []; }
   };
 })();

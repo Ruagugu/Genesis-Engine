@@ -14,10 +14,11 @@ test.describe('Phase D seats + clock + oracle', () => {
     await request.post('/api/v1/runs', { data: { id: RUN, seed: 20260725, reset: true } });
   });
 
-  test('health reports phase D', async ({ request }) => {
+  test('health reports oracle-capable phase', async ({ request }) => {
     const h = await (await request.get('/api/v1/health')).json();
-    expect(h.phase).toBe('D');
+    expect(h.phase).toBe('E');
     expect(h.dOracle).toBe(true);
+    expect(h.eGenesis).toBe(true);
     expect(h.clock).toBeTruthy();
   });
 
@@ -343,8 +344,13 @@ test.describe('Phase D seats + clock + oracle', () => {
 });
 
 test.describe('Phase D oracle frontend', () => {
-  test('opens structured oracle wizard with P9 guidance and can start clock', async ({ page }) => {
+  test('opens structured oracle wizard with P9 guidance and can start clock', async ({ page, request }) => {
+    // 阶段 E 起其他用例可能在 local-seed 上占用 owner 席位；
+    // 重置 run 并清身份，恢复「本页匿名 token 为首个认领者 → owner」前提
+    await request.post('/api/v1/runs/local-seed/reset');
     await page.goto('/');
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
     await page.waitForFunction(() => window.GE && GE.app && GE.app.state && GE.app.state.started, null, { timeout: 30_000 });
     await page.locator('#btn-edict').click();
     await expect(page.locator('#oracle-hud')).toBeVisible();

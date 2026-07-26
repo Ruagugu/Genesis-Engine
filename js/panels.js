@@ -782,19 +782,8 @@ GE.panels = (function () {
      神谕（阶段 D · 点数购档 · P9）
      ============================================================ */
   function playerToken() {
-    try {
-      let t = localStorage.getItem('ge-player-token');
-      if (!t || t.length < 12) {
-        const bytes = new Uint8Array(16);
-        if (crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
-        else for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-        t = 'ge_' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-        localStorage.setItem('ge-player-token', t);
-      }
-      return t;
-    } catch (_) {
-      return 'ge_anon_' + String(Date.now());
-    }
+    // 阶段 E：统一走 GE.auth（会话内稳定；绝不每次新造 token 刷孤儿席位）
+    return GE.auth ? GE.auth.ensureToken() : null;
   }
 
   function apiRoot() {
@@ -839,7 +828,7 @@ GE.panels = (function () {
     const claim = await apiJson('POST', `/api/v1/runs/${encodeURIComponent(runId())}/seats/claim`, {
       playerToken: playerToken(),
       civId: civId || 'dawn',
-      displayName: '旅人'
+      displayName: (GE.auth && GE.auth.username()) || '旅人'
     });
     return claim.data;
   }
@@ -1752,10 +1741,191 @@ GE.panels = (function () {
     }
   }
 
+  /* ============================================================
+     创世者账号（阶段 E · 注册 / 登录 / 创建文明入口）
+     ============================================================ */
+  async function openAccount() {
+    const auth = GE.auth;
+    const logged = auth && auth.isLoggedIn() ? await auth.me() : null;
+    if (logged) {
+      const me = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/me`);
+      const seat = me.ok && me.data ? me.data.seat : null;
+      const civ = me.ok && me.data ? me.data.civ : null;
+      GE.modal.open({
+        id: 'account',
+        title: `创世者 · ${logged.username}`,
+        subtitle: '账号与文明绑定',
+        icon: 'crown',
+        accent: '#d8b76a',
+        size: 'sm',
+        body: `
+          <div class="panel" style="margin-bottom:12px">
+            <div class="kv"><span class="k">用户名</span><span class="v">${esc(logged.username)}</span></div>
+            <div class="kv"><span class="k">席位</span><span class="v">${seat ? esc(seat.role) : '未入座'}</span></div>
+            <div class="kv"><span class="k">文明</span><span class="v">${civ ? esc(civ.name) : '尚未绑定'}</span></div>
+            ${seat ? `<div class="kv"><span class="k">神谕点</span><span class="v mono">${seat.oraclePoints}</span></div>` : ''}
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+            ${!civ ? `<button class="btn btn-gold" id="acc-create">${ic('flag', 14)}创建文明</button>` : ''}
+            ${civ ? `<button class="btn" id="acc-view-civ">查看我的文明</button>` : ''}
+            <button class="btn" id="acc-logout">退出登录</button>
+          </div>`,
+        onOpen: (body) => {
+          const create = body.querySelector('#acc-create');
+          if (create) create.addEventListener('click', () => { GE.modal.close(); openCreateCiv(); });
+          const view = body.querySelector('#acc-view-civ');
+          if (view && civ) view.addEventListener('click', () => { GE.modal.close(); openCiv(civ.id); });
+          body.querySelector('#acc-logout').addEventListener('click', () => {
+            auth.logout();
+            if (GE.app && GE.app.refreshAccountHud) GE.app.refreshAccountHud();
+            GE.modal.close();
+            GE.toast.info('已退出', '身份已切换为匿名观察者。');
+          });
+        }
+      });
+      return;
+    }
+
+    GE.modal.open({
+      id: 'account',
+      title: '创世者身份',
+      subtitle: '注册或登录 · 创建并降临你的文明',
+      icon: 'crown',
+      accent: '#d8b76a',
+      size: 'sm',
+      body: `
+        <div class="card-grid cols-2" style="margin-bottom:12px">
+          <button type="button" class="panel acc-tab on" data-tab="login" style="cursor:pointer;text-align:center;font-weight:700">登录</button>
+          <button type="button" class="panel acc-tab" data-tab="register" style="cursor:pointer;text-align:center;font-weight:700">注册</button>
+        </div>
+        <input id="acc-name" class="edict-input" placeholder="用户名（2～24 位中英文数字 ._-）" style="width:100%;margin-bottom:8px" autocomplete="username">
+        <input id="acc-pass" class="edict-input" type="password" placeholder="密码（至少 6 位）" style="width:100%;margin-bottom:8px" autocomplete="current-password">
+        <div id="acc-msg" class="tx2" style="min-height:18px;font-size:11.5px;margin-bottom:6px"></div>
+        <div style="display:flex;justify-content:flex-end">
+          <button class="btn btn-gold" id="acc-submit">${ic('send', 14)}<span id="acc-submit-label">登录</span></button>
+        </div>
+        <div class="panel" style="margin-top:12px;font-size:11px;color:var(--tx-2)">${ic('info', 12)} 本地账号：注册即可创建自己的文明并选择落地之地；未登录仍可作为观察者浏览世界。</div>`,
+      onOpen: (body) => {
+        let tab = 'login';
+        const msg = body.querySelector('#acc-msg');
+        const tabs = body.querySelectorAll('.acc-tab');
+        tabs.forEach(t => t.addEventListener('click', () => {
+          tab = t.dataset.tab;
+          tabs.forEach(x => x.classList.toggle('on', x === t));
+          body.querySelector('#acc-submit-label').textContent = tab === 'login' ? '登录' : '注册';
+          body.querySelector('#acc-pass').setAttribute('autocomplete', tab === 'login' ? 'current-password' : 'new-password');
+          msg.textContent = '';
+        }));
+        const submit = body.querySelector('#acc-submit');
+        submit.addEventListener('click', async () => {
+          const name = body.querySelector('#acc-name').value.trim();
+          const pass = body.querySelector('#acc-pass').value;
+          if (!name || !pass) { msg.textContent = '请输入用户名与密码。'; return; }
+          submit.disabled = true;
+          msg.textContent = tab === 'login' ? '登录中…' : '注册中…';
+          const r = tab === 'login' ? await GE.auth.login(name, pass) : await GE.auth.register(name, pass);
+          submit.disabled = false;
+          if (!r.ok) {
+            msg.textContent = (r.data && (r.data.message || r.data.error)) || `失败（HTTP ${r.status}）`;
+            return;
+          }
+          if (GE.app && GE.app.refreshAccountHud) GE.app.refreshAccountHud();
+          GE.modal.close();
+          GE.toast.show({ type: 'ok', icon: 'crown', title: `欢迎，${r.data.username}`, msg: tab === 'register' ? '账号已建立。现在创建属于你的文明吧。' : '身份已恢复。' });
+          // 注册/登录后：无席位则直接引导创建文明
+          const me = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/me`);
+          if (!(me.ok && me.data && me.data.civ)) openCreateCiv();
+        });
+      }
+    });
+  }
+
+  const CIV_TEMPERAMENTS = ['均衡', '尚武', '求知', '重商', '守序', '灵性'];
+  const CIV_COLORS = ['#e35d6a', '#5dade2', '#58d68d', '#f4d03f', '#af7ac5', '#e59866', '#48c9b0', '#ec7063'];
+
+  function openCreateCiv() {
+    GE.modal.open({
+      id: 'create-civ',
+      title: '创建文明',
+      subtitle: '创世之初 · 你的族群将从原始时代醒来',
+      icon: 'flag',
+      accent: '#d8b76a',
+      size: 'lg',
+      body: `
+        ${secHead('flag', '族群')}
+        <div class="card-grid cols-2" style="margin-bottom:8px">
+          <input id="cc-name" class="edict-input" placeholder="文明名称（必填，≤24 字）">
+          <input id="cc-short" class="edict-input" placeholder="简称（默认取前两字）">
+        </div>
+        <div class="card-grid cols-2" style="margin-bottom:8px">
+          <input id="cc-race" class="edict-input" placeholder="种族（默认：人族）">
+          <input id="cc-leader" class="edict-input" placeholder="领袖名（可空，自动起名）">
+        </div>
+        ${secHead('compass', '气质倾向')}
+        <div class="card-grid cols-3" id="cc-temps" style="margin-bottom:8px">
+          ${CIV_TEMPERAMENTS.map((t, i) => `<button type="button" class="panel cc-temp${i === 0 ? ' on' : ''}" data-t="${t}" style="cursor:pointer;text-align:center;font-weight:700">${t}</button>`).join('')}
+        </div>
+        ${secHead('sparkle', '主色')}
+        <div style="display:flex;gap:8px;margin-bottom:8px" id="cc-colors">
+          ${CIV_COLORS.map((c, i) => `<button type="button" class="cc-color${i === 0 ? ' on' : ''}" data-c="${c}" style="width:26px;height:26px;border-radius:8px;background:${c};border:2px solid ${i === 0 ? '#fff' : 'transparent'};cursor:pointer"></button>`).join('')}
+        </div>
+        ${secHead('scroll', '起源一句话')}
+        <textarea id="cc-origin" class="edict-input" rows="2" placeholder="（可空）例如：自高原冷风中醒来的观星族群…" style="width:100%;margin-bottom:8px"></textarea>
+        <div id="cc-msg" class="tx2" style="min-height:18px;font-size:11.5px;margin-bottom:6px"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px">
+          <button class="btn btn-gold" id="cc-submit">${ic('flag', 14)}创建并选择落地之地</button>
+        </div>
+        <div class="panel" style="margin-top:10px;font-size:11px;color:var(--tx-2)">${ic('info', 12)} 文明将以原始时代（等级 0）诞生；已配置 AI 时会自动润色思潮与领袖背景。创建后需在盖亚上点选落地地块。</div>`,
+      onOpen: (body) => {
+        let temperament = CIV_TEMPERAMENTS[0];
+        let color = CIV_COLORS[0];
+        body.querySelectorAll('.cc-temp').forEach(b => b.addEventListener('click', () => {
+          temperament = b.dataset.t;
+          body.querySelectorAll('.cc-temp').forEach(x => x.classList.toggle('on', x === b));
+        }));
+        body.querySelectorAll('.cc-color').forEach(b => b.addEventListener('click', () => {
+          color = b.dataset.c;
+          body.querySelectorAll('.cc-color').forEach(x => { x.style.border = '2px solid transparent'; x.classList.remove('on'); });
+          b.style.border = '2px solid #fff';
+          b.classList.add('on');
+        }));
+        const msg = body.querySelector('#cc-msg');
+        const submit = body.querySelector('#cc-submit');
+        submit.addEventListener('click', async () => {
+          const name = body.querySelector('#cc-name').value.trim();
+          if (!name) { msg.textContent = '请先给文明起名。'; return; }
+          submit.disabled = true;
+          msg.textContent = '创建中…';
+          const r = await apiJson('POST', `/api/v1/runs/${encodeURIComponent(runId())}/civs`, {
+            name,
+            short: body.querySelector('#cc-short').value.trim(),
+            race: body.querySelector('#cc-race').value.trim(),
+            leaderName: body.querySelector('#cc-leader').value.trim(),
+            origin: body.querySelector('#cc-origin').value.trim(),
+            temperament,
+            color
+          });
+          submit.disabled = false;
+          if (!r.ok) {
+            msg.textContent = (r.data && (r.data.message || r.data.error)) || `创建失败（HTTP ${r.status}）`;
+            return;
+          }
+          const civ = r.data.civ;
+          if (!(D().civs || []).some(c => c.id === civ.id)) D().civs.push(civ);
+          if (GE.app && GE.app.refreshCivChrome) GE.app.refreshCivChrome();
+          if (GE.app && GE.app.refreshAccountHud) GE.app.refreshAccountHud();
+          GE.modal.close();
+          if (GE.app && GE.app.startLandingMode) GE.app.startLandingMode(civ.id);
+        });
+      }
+    });
+  }
+
   /* ============ 导出 ============ */
   return {
     openCiv, openLeader, openStation, openPlanetInfo, openChronicle,
     openFavorites, openCodex, openWorld, openEdict, openSettings, openDeduction, openLlmLogs, openWarehouse, openRegion,
+    openAccount, openCreateCiv,
     playMonologueReel, refreshOracleHud, setServerClockPaused, playerToken, ensureSeat
   };
 })();
