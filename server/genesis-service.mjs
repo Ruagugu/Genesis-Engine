@@ -324,18 +324,20 @@ async function enrichCivWithLlm(run, civ) {
   if (!parsed || typeof parsed !== 'object') return { ok: false, reason: 'parse_fail' };
 
   let applied = 0;
+  const fields = {};
+  const leaderFields = {};
   ENRICH_FIELDS.forEach(f => {
     const v = String(parsed[f] || '').trim();
-    if (v && v.length >= 6 && v.length <= 120) { civ[f] = v; applied += 1; }
+    if (v && v.length >= 6 && v.length <= 120) { civ[f] = v; fields[f] = v; applied += 1; }
   });
   if (leader) {
     const bg = String(parsed.leaderBackground || '').trim();
     const mv = String(parsed.leaderMotive || '').trim();
-    if (bg && bg.length >= 10 && bg.length <= 160) { leader.background = bg; applied += 1; }
-    if (mv && mv.length >= 6 && mv.length <= 120) { leader.motive = mv; applied += 1; }
+    if (bg && bg.length >= 10 && bg.length <= 160) { leader.background = bg; leaderFields.background = bg; applied += 1; }
+    if (mv && mv.length >= 6 && mv.length <= 120) { leader.motive = mv; leaderFields.motive = mv; applied += 1; }
   }
   if (applied > 0) run.revision = (Number(run.revision) || 0) + 1;
-  return { ok: true, applied };
+  return { ok: true, applied, fields, leaderFields };
 }
 
 /**
@@ -391,7 +393,7 @@ function settleCiv(run, user, civId, body) {
   }
 
   run.revision = (Number(run.revision) || 0) + 1;
-  return { ok: true, status: 200, civId, capital, tileId, revision: run.revision };
+  return { ok: true, status: 200, civId, capital, tileId, landing: civ.landing, revision: run.revision };
 }
 
 export {

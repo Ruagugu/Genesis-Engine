@@ -577,7 +577,8 @@ async function handleApi(req, res, urlPath) {
     if (!result.ok) { json(res, result.status || 400, result); return true; }
     touchRun(run);
     sseHub.publish(run.id, 'civ.created', {
-      civId: result.civ.id, name: result.civ.name, by: user.username
+      civId: result.civ.id, name: result.civ.name, by: user.username,
+      civ: result.civ, seat: result.seat
     });
     sseHub.publish(run.id, 'seat.claimed', { seat: result.seat });
     // LLM 补全异步跟进：成功则 revision++ 并广播，前端可拉快照刷新文案
@@ -585,7 +586,10 @@ async function handleApi(req, res, urlPath) {
       .then(r => {
         if (r && r.ok && r.applied) {
           touchRun(run);
-          sseHub.publish(run.id, 'civ.enriched', { civId: result.civ.id, applied: r.applied });
+          sseHub.publish(run.id, 'civ.enriched', {
+            civId: result.civ.id, applied: r.applied,
+            fields: r.fields || {}, leaderFields: r.leaderFields || {}
+          });
         }
       })
       .catch(err => console.warn('[genesis] enrich failed', err && err.message));
@@ -608,7 +612,9 @@ async function handleApi(req, res, urlPath) {
     const result = genesisService.settleCiv(run, user, civId, body);
     if (!result.ok) { json(res, result.status || 400, result); return true; }
     touchRun(run);
-    sseHub.publish(run.id, 'civ.settled', { civId, capital: result.capital, tileId: result.tileId });
+    sseHub.publish(run.id, 'civ.settled', {
+      civId, capital: result.capital, tileId: result.tileId, landing: result.landing
+    });
     json(res, 200, result);
     return true;
   }

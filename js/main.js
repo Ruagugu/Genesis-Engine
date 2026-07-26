@@ -137,10 +137,135 @@ GE.app = (function () {
           if (x.phase === 'error') GE.toast.warn('自动推演失败', x.error || '未知错误');
         } catch (_) { /* ignore */ }
       });
-      oracleEvents.addEventListener('round.done', () => {
+      oracleEvents.addEventListener('round.done', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud();
+          // 阶段 F：他人触发的年结算，观察端按 revision 拉快照收敛
+          maybeConvergeSnapshot(x.revision);
+        } catch (_) { /* ignore */ }
+      });
+      // 阶段 F：同局其他玩家的创世动作实时合并；本机操作的回声幂等跳过
+      oracleEvents.addEventListener('civ.created', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          const civ = x.civ;
+          if (!civ || !civ.id) return;
+          if ((GE.data.civs || []).some(c => c.id === civ.id)) return;
+          GE.data.civs.push(civ);
+          refreshCivChrome();
+          if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud();
+          GE.toast.show({
+            type: 'info', icon: 'flag', title: '新文明诞生',
+            msg: `${x.by || '旅人'}创立了「${civ.name}」。`
+          });
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('civ.enriched', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          const civ = (GE.data.civs || []).find(c => c.id === x.civId);
+          if (!civ) return;
+          if (x.fields && typeof x.fields === 'object') Object.assign(civ, x.fields);
+          const leader = civ.leaders && civ.leaders[0];
+          if (leader && x.leaderFields && typeof x.leaderFields === 'object') {
+            Object.assign(leader, x.leaderFields);
+          }
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('civ.settled', e => {
+        try {
+          const x = JSON.parse(e.data || '{}');
+          const civ = (GE.data.civs || []).find(c => c.id === x.civId);
+          if (!civ) return;
+          const landing = x.landing || {};
+          // 本机落地者在 confirmLanding 已写 territorySeed / 地块，回声只补 landing 记录
+          const already = !!(civ.territorySeed && Number.isFinite(Number(civ.territorySeed.lat)));
+          civ.capital = x.capital || civ.capital;
+          if (landing.tileId || Number.isFinite(Number(landing.lat))) civ.landing = landing;
+          if (already) return;
+          if (Number.isFinite(Number(landing.lat))) {
+            civ.territorySeed = { lat: Number(landing.lat), lon: Number(landing.lon), weight: 1 };
+          }
+          if (GE.worldState && GE.worldState.surfaceId === (landing.surfaceId || 'gaiya:surface')) {
+            const def = GE.worldState.def;
+            if (def && Number.isFinite(Number(landing.lat))) {
+              def.capitalSeeds = def.capitalSeeds || {};
+              def.claimRadius = def.claimRadius || {};
+              def.capitalSeeds[civ.id] = { lat: Number(landing.lat), lon: Number(landing.lon) };
+              def.claimRadius[civ.id] = 4;
+            }
+            const tile = landing.tileId ? GE.worldState.getTile(landing.tileId) : null;
+            if (tile && !tile.ownerCivId) {
+              GE.worldState.setTileOwner(tile.id, civ.id, { claimSource: 'landing' });
+            }
+            if (GE.views.planet && GE.views.planet.rebuildStrategicMap) GE.views.planet.rebuildStrategicMap();
+          }
+          refreshCivChrome();
+          GE.toast.show({
+            type: 'info', icon: 'globe', title: '文明落地',
+            msg: `「${civ.name}」在盖亚立起${x.capital || '初火营地'}。`
+          });
+        } catch (_) { /* ignore */ }
+      });
+      oracleEvents.addEventListener('seat.claimed', () => {
         try { if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud(); } catch (_) { /* ignore */ }
       });
     } catch (_) { /* EventSource unavailable / server optional */ }
+  }
+
+  /* 阶段 F：观察端快照收敛 —— 只做选择性合并，不整体替换活引用 */
+  let snapshotConverging = false;
+  async function maybeConvergeSnapshot(revision) {
+    const rev = Number(revision);
+    if (!Number.isFinite(rev)) return;
+    const last = GE.snapshot && GE.snapshot.last;
+    if (!last || rev <= Number(last.revision || 0) || snapshotConverging) return;
+    snapshotConverging = true;
+    try {
+      const res = await fetch(`${apiRoot()}/api/v1/runs/${encodeURIComponent(runId())}/snapshot`, {
+        cache: 'no-store', headers: { Accept: 'application/json' }
+      });
+      if (!res.ok) return;
+      const snap = await res.json();
+      if (snap.world) GE.data.world = snap.world;
+      if (Array.isArray(snap.civs)) GE.data.civs = snap.civs;
+      if (Array.isArray(snap.chronicle)) GE.data.chronicle = snap.chronicle;
+      if (snap.thresholds) GE.data.thresholds = snap.thresholds;
+      if (snap.favorites) GE.data.favorites = snap.favorites;
+      if (snap.relations) GE.data.relations = snap.relations;
+      if (snap.legacies) GE.data.legacies = snap.legacies;
+      if (snap.deduction) GE.data.deduction = snap.deduction;
+      // surface def 只并入种子：worldState.def 是活引用，整体替换会打断地块状态
+      Object.entries(snap.bodySurfaces || {}).forEach(([sid, remote]) => {
+        const targets = [GE.data.bodySurfaces && GE.data.bodySurfaces[sid]];
+        if (GE.worldState && GE.worldState.surfaceId === sid) targets.push(GE.worldState.def);
+        targets.forEach(local => {
+          if (!local || local === remote) return;
+          if (remote.capitalSeeds) local.capitalSeeds = Object.assign(local.capitalSeeds || {}, remote.capitalSeeds);
+          if (remote.claimRadius) local.claimRadius = Object.assign(local.claimRadius || {}, remote.claimRadius);
+        });
+      });
+      // 新天体只增不换（与 applyToData 相同的 parent/home 映射）
+      (snap.spaceBodies || []).forEach(b => {
+        if ((GE.data.spaceBodies || []).some(x => x.id === b.id)) return;
+        const body = { ...b };
+        if (body.parentBodyId && !body.parent) body.parent = body.parentBodyId;
+        if (body.flags && body.flags.isPlayerHome) body.home = true;
+        GE.data.spaceBodies.push(body);
+      });
+      GE.snapshot.last = snap;
+      if (snap.revision != null) state.revision = snap.revision;
+      state.simulatedYear = (GE.data.world && GE.data.world.年数) || state.simulatedYear;
+      const topRound = GE.data.deduction && GE.data.deduction.log && GE.data.deduction.log[0];
+      if (topRound && Number.isFinite(Number(topRound.round))) state.deductionRound = Number(topRound.round);
+      hydrateWorldStrip();
+      refreshCivChrome();
+      try { if (GE.panels?.refreshOracleHud) GE.panels.refreshOracleHud(); } catch (_) { /* ignore */ }
+    } catch (_) { /* 网络失败：下一次 round.done 再收敛 */
+    } finally {
+      snapshotConverging = false;
+    }
   }
 
   /* ============ 启动 ============ */
@@ -720,12 +845,17 @@ GE.app = (function () {
         .then(r => {
           if (!r) return;
           if (!r.ok) {
+            // 阶段 F：服务端拒绝（member 无权等）时回滚乐观切换的按钮状态
+            syncPlayFromServerClock({ paused: state.playing });
             GE.toast.warn('服务端时钟未同步', r.message || r.error || '请先在神谕面板认领 owner 席位。');
             return;
           }
           if (GE.panels && GE.panels.refreshOracleHud) GE.panels.refreshOracleHud();
         })
-        .catch(err => GE.toast.warn('服务端时钟未同步', String(err && err.message || err)));
+        .catch(err => {
+          syncPlayFromServerClock({ paused: state.playing });
+          GE.toast.warn('服务端时钟未同步', String(err && err.message || err));
+        });
     }
   }
 

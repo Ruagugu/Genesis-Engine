@@ -1751,6 +1751,15 @@ GE.panels = (function () {
       const me = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/me`);
       const seat = me.ok && me.data ? me.data.seat : null;
       const civ = me.ok && me.data ? me.data.civ : null;
+      // 阶段 F：同局在场玩家
+      const seatsRes = await apiJson('GET', `/api/v1/runs/${encodeURIComponent(runId())}/seats`);
+      const allSeats = (seatsRes.ok && seatsRes.data && Array.isArray(seatsRes.data.items)) ? seatsRes.data.items : [];
+      const seatRows = allSeats.map(s => {
+        const sCiv = s.civId && (D().civs || []).find(c => c.id === s.civId);
+        const roleTag = s.role === 'owner' ? '局主' : '成员';
+        return `<div class="kv"><span class="k">${esc(s.displayName || '旅人')}</span>` +
+          `<span class="v">${roleTag} · ${sCiv ? esc(sCiv.name) : '未建文明'}</span></div>`;
+      }).join('');
       GE.modal.open({
         id: 'account',
         title: `创世者 · ${logged.username}`,
@@ -1765,6 +1774,10 @@ GE.panels = (function () {
             <div class="kv"><span class="k">文明</span><span class="v">${civ ? esc(civ.name) : '尚未绑定'}</span></div>
             ${seat ? `<div class="kv"><span class="k">神谕点</span><span class="v mono">${seat.oraclePoints}</span></div>` : ''}
           </div>
+          ${seatRows ? `<div class="panel" id="acc-seats" style="margin-bottom:12px">
+            <div style="font-weight:700;font-size:11.5px;margin-bottom:6px;color:var(--tx-2)">${ic('users', 12)} 同局玩家 · ${allSeats.length}</div>
+            ${seatRows}
+          </div>` : ''}
           <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
             ${!civ ? `<button class="btn btn-gold" id="acc-create">${ic('flag', 14)}创建文明</button>` : ''}
             ${civ ? `<button class="btn" id="acc-view-civ">查看我的文明</button>` : ''}
